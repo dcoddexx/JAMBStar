@@ -128,12 +128,24 @@ ALTER TABLE public.quiz_results ENABLE ROW LEVEL SECURITY;
 -- Users can read, insert, and update their own profile data; admins can view all; super_admins can manage all
 -- ------------------------------------------------------------------------------
 DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
-DROP POLICY IF EXISTS "Admins can view all profiles" ON public.profiles;
 CREATE POLICY "Users can view own profile"
     ON public.profiles
     FOR SELECT
     TO authenticated
-    USING (auth.uid() = id OR public.is_admin());
+    USING (auth.uid() = id);
+
+DROP POLICY IF EXISTS "Admins can view all profiles" ON public.profiles;
+CREATE POLICY "Admins can view all profiles" 
+    ON public.profiles 
+    FOR SELECT 
+    TO authenticated
+    USING (
+        public.is_admin() OR
+        EXISTS (
+            SELECT 1 FROM public.profiles 
+            WHERE id = auth.uid() AND role IN ('admin', 'super_admin')
+        )
+    );
 
 DROP POLICY IF EXISTS "Users can insert own profile" ON public.profiles;
 CREATE POLICY "Users can insert own profile"

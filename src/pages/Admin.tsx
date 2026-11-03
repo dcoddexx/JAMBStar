@@ -73,6 +73,7 @@ export const Admin: React.FC = () => {
 
   // User Management State
   const [profiles, setProfiles] = useState<Profile[]>([])
+  const [totalProfilesCount, setTotalProfilesCount] = useState<number>(0)
   const [loadingProfiles, setLoadingProfiles] = useState<boolean>(true)
   const [userSearch, setUserSearch] = useState<string>('')
   const [trackFilter, setTrackFilter] = useState<string>('All')
@@ -146,10 +147,12 @@ export const Admin: React.FC = () => {
   })
   const [settingsSavedMsg, setSettingsSavedMsg] = useState<string | null>(null)
 
-  // Role Checks
-  const userRole = currentUser?.role || null
-  const isSuperAdmin = userRole === 'super_admin'
-  const isAdmin = userRole === 'admin' || isSuperAdmin
+  // Role Checks with normalization (handles 'super_admin', 'superadmin', 'admin' case-insensitively)
+  const normalizedRole = currentUser?.role
+    ? currentUser.role.toLowerCase().trim().replace(/[\s_-]/g, '')
+    : null
+  const isSuperAdmin = normalizedRole === 'superadmin'
+  const isAdmin = normalizedRole === 'admin' || isSuperAdmin
 
   // ---------------------------------------------------------------------------
   // Data Fetching
@@ -169,7 +172,11 @@ export const Admin: React.FC = () => {
           .eq('id', user.id)
           .maybeSingle()
 
-        const role = (profile?.role as 'student' | 'admin' | 'super_admin') || 'admin'
+        const rawRole = profile?.role
+        const clean = rawRole ? rawRole.toLowerCase().trim().replace(/[\s_-]/g, '') : ''
+        const role: 'student' | 'admin' | 'super_admin' =
+          clean === 'superadmin' ? 'super_admin' : clean === 'admin' ? 'admin' : 'student'
+
         setCurrentUser({
           id: user.id,
           email: user.email,
@@ -184,17 +191,19 @@ export const Admin: React.FC = () => {
     }
   }
 
-  // Load Profiles
+  // Load Profiles with exact server-side count
   const fetchProfiles = async () => {
     setLoadingProfiles(true)
     try {
-      const { data, error } = await supabase
+      const { data, count, error } = await supabase
         .from('profiles')
-        .select('*')
+        .select('*', { count: 'exact', head: false })
         .order('created_at', { ascending: false })
 
       if (error) throw error
-      setProfiles(data || [])
+      const fetched = data || []
+      setProfiles(fetched)
+      setTotalProfilesCount(count !== null && count !== undefined ? count : fetched.length)
     } catch (err: unknown) {
       const e = err as Error
       console.error('Error fetching profiles:', e)
@@ -302,6 +311,9 @@ export const Admin: React.FC = () => {
         prev.map((p) => (p.id === userId ? { ...p, role: newRole } : p))
       )
       setProfileActionMsg({ type: 'success', text: `User role successfully updated to "${newRole}".` })
+
+      // Automatically re-fetch profiles from database to sync exact metric counts & state
+      await fetchProfiles()
     } catch (err: unknown) {
       const e = err as Error
       setProfileActionMsg({ type: 'error', text: `Failed to update role: ${e.message}` })
@@ -336,6 +348,9 @@ export const Admin: React.FC = () => {
         text: `Account for "${userToDelete.full_name || userToDelete.id}" has been deleted.`,
       })
       setUserToDelete(null)
+
+      // Automatically re-fetch profiles from database to sync exact metric counts & state
+      await fetchProfiles()
     } catch (err: unknown) {
       const e = err as Error
       setProfileActionMsg({ type: 'error', text: `Failed to delete account: ${e.message}` })
@@ -910,6 +925,15 @@ export const Admin: React.FC = () => {
     return counts
   }, [allQuestionsSummary])
 
+  // Computed exact metric counts distinguishing Total System Users, Candidates, and Staff/Admins
+  const totalSystemUsers = totalProfilesCount || profiles.length
+  const totalCandidatesCount = useMemo(() => {
+    return profiles.filter((p) => p.role === 'student').length
+  }, [profiles])
+  const totalAdminsCount = useMemo(() => {
+    return profiles.filter((p) => p.role === 'admin' || p.role === 'super_admin').length
+  }, [profiles])
+
   const validCount = parsedQuestions.filter((q) => q.isValid).length
   const invalidCount = parsedQuestions.filter((q) => !q.isValid).length
 
@@ -957,17 +981,21 @@ export const Admin: React.FC = () => {
           </p>
         </div>
 
-        {/* Top Summary Metrics */}
-        <div className="grid grid-cols-3 gap-3 shrink-0">
+        {/* Top Summary Metrics: Total Users, Candidates, Staff/Admins, Questions */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 shrink-0">
           <div className="bg-white/10 backdrop-blur rounded-xl p-3 border border-white/10 text-center">
-            <div className="text-xl sm:text-2xl font-bold font-mono text-emerald-400">{profiles.length}</div>
+            <div className="text-xl sm:text-2xl font-bold font-mono text-white">{totalSystemUsers}</div>
+            <div className="text-[10px] sm:text-xs text-slate-300 uppercase tracking-wider">Total Users</div>
+          </div>
+          <div className="bg-white/10 backdrop-blur rounded-xl p-3 border border-white/10 text-center">
+            <div className="text-xl sm:text-2xl font-bold font-mono text-emerald-400">{totalCandidatesCount}</div>
             <div className="text-[10px] sm:text-xs text-slate-300 uppercase tracking-wider">Candidates</div>
           </div>
           <div className="bg-white/10 backdrop-blur rounded-xl p-3 border border-white/10 text-center">
-            <div className="text-xl sm:text-2xl font-bold font-mono text-teal-400">
-              {profiles.filter((p) => p.role === 'admin' || p.role === 'super_admin').length}
+            <div className="text-xl sm:text-2xl font-bold font-mono text-teal-300">
+              {totalAdminsCount}
             </div>
-            <div className="text-[10px] sm:text-xs text-slate-300 uppercase tracking-wider">Admins</div>
+            <div className="text-[10px] sm:text-xs text-slate-300 uppercase tracking-wider">Staff / Admins</div>
           </div>
           <div className="bg-white/10 backdrop-blur rounded-xl p-3 border border-white/10 text-center">
             <div className="text-xl sm:text-2xl font-bold font-mono text-indigo-300">
@@ -1028,7 +1056,7 @@ export const Admin: React.FC = () => {
             </span>
           ) : (
             <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-bold">
-              {profiles.length}
+              {totalSystemUsers}
             </span>
           )}
         </button>
@@ -1061,41 +1089,43 @@ export const Admin: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
               <div className="flex items-center justify-between text-gray-500 text-xs font-bold uppercase tracking-wider">
-                <span>Total Candidates</span>
-                <span className="text-lg">🎓</span>
+                <span>Total System Users</span>
+                <span className="text-lg">👥</span>
               </div>
               <div className="text-3xl font-extrabold text-gray-900 mt-2 font-mono">
-                {profiles.length}
+                {totalSystemUsers}
               </div>
-              <div className="mt-2 text-xs text-gray-500 flex gap-2">
-                <span>Science: {profiles.filter((p) => p.track === 'Science').length}</span>
+              <div className="mt-2 text-xs text-gray-500 flex gap-1.5 flex-wrap">
+                <span>Candidates: <strong className="text-emerald-700">{totalCandidatesCount}</strong></span>
                 <span>•</span>
-                <span>Arts: {profiles.filter((p) => p.track === 'Arts').length}</span>
-                <span>•</span>
-                <span>Comm: {profiles.filter((p) => p.track === 'Commercial').length}</span>
+                <span>Staff: <strong className="text-indigo-700">{totalAdminsCount}</strong></span>
               </div>
             </div>
 
             <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
               <div className="flex items-center justify-between text-gray-500 text-xs font-bold uppercase tracking-wider">
-                <span>Question Bank Size</span>
-                <span className="text-lg">📚</span>
+                <span>Active Candidates</span>
+                <span className="text-lg">🎓</span>
               </div>
               <div className="text-3xl font-extrabold text-emerald-700 mt-2 font-mono">
-                {allQuestionsSummary.length}
+                {totalCandidatesCount}
               </div>
-              <div className="mt-2 text-xs text-gray-500">
-                Across {subjects.length} registered UTME subjects
+              <div className="mt-2 text-xs text-gray-500 flex gap-2">
+                <span>Science: {profiles.filter((p) => p.role === 'student' && p.track === 'Science').length}</span>
+                <span>•</span>
+                <span>Arts: {profiles.filter((p) => p.role === 'student' && p.track === 'Arts').length}</span>
+                <span>•</span>
+                <span>Comm: {profiles.filter((p) => p.role === 'student' && p.track === 'Commercial').length}</span>
               </div>
             </div>
 
             <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
               <div className="flex items-center justify-between text-gray-500 text-xs font-bold uppercase tracking-wider">
-                <span>Administrative Team</span>
+                <span>Administrative Staff</span>
                 <span className="text-lg">🛡️</span>
               </div>
               <div className="text-3xl font-extrabold text-indigo-700 mt-2 font-mono">
-                {profiles.filter((p) => p.role === 'admin' || p.role === 'super_admin').length}
+                {totalAdminsCount}
               </div>
               <div className="mt-2 text-xs text-gray-500">
                 {profiles.filter((p) => p.role === 'super_admin').length} Super Admin(s),{' '}
@@ -1193,14 +1223,14 @@ export const Admin: React.FC = () => {
           {/* Track Distribution & Recent Candidates */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
-              <h3 className="text-sm font-bold text-gray-900 mb-3">Track Distribution</h3>
+              <h3 className="text-sm font-bold text-gray-900 mb-3">Candidate Track Distribution</h3>
               <div className="space-y-3">
                 {[
-                  { name: 'Science', color: 'bg-blue-500', count: profiles.filter((p) => p.track === 'Science').length },
-                  { name: 'Arts', color: 'bg-purple-500', count: profiles.filter((p) => p.track === 'Arts').length },
-                  { name: 'Commercial', color: 'bg-amber-500', count: profiles.filter((p) => p.track === 'Commercial').length },
+                  { name: 'Science', color: 'bg-blue-500', count: profiles.filter((p) => p.role === 'student' && p.track === 'Science').length },
+                  { name: 'Arts', color: 'bg-purple-500', count: profiles.filter((p) => p.role === 'student' && p.track === 'Arts').length },
+                  { name: 'Commercial', color: 'bg-amber-500', count: profiles.filter((p) => p.role === 'student' && p.track === 'Commercial').length },
                 ].map((t) => {
-                  const pct = profiles.length > 0 ? Math.round((t.count / profiles.length) * 100) : 0
+                  const pct = totalCandidatesCount > 0 ? Math.round((t.count / totalCandidatesCount) * 100) : 0
                   return (
                     <div key={t.name}>
                       <div className="flex justify-between text-xs font-medium text-gray-700 mb-1">

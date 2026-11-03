@@ -51,6 +51,25 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
 };
 
 // -----------------------------------------------------------------------------
+// Role Normalization Helpers: handle 'admin', 'super_admin', 'superadmin' case-insensitively
+// -----------------------------------------------------------------------------
+export const normalizeRole = (
+  rawRole: string | null | undefined
+): "student" | "admin" | "super_admin" => {
+  if (!rawRole) return "student";
+  const clean = rawRole.toLowerCase().trim().replace(/[\s_-]/g, "");
+  if (clean === "superadmin") return "super_admin";
+  if (clean === "admin") return "admin";
+  return "student";
+};
+
+export const isUserAdmin = (rawRole: string | null | undefined): boolean => {
+  if (!rawRole) return false;
+  const clean = rawRole.toLowerCase().trim().replace(/[\s_-]/g, "");
+  return clean === "admin" || clean === "superadmin";
+};
+
+// -----------------------------------------------------------------------------
 // AdminRoute: Checks user role from profiles; redirects students to '/dashboard'
 // -----------------------------------------------------------------------------
 interface AdminRouteProps {
@@ -81,7 +100,8 @@ const AdminRoute: React.FC<AdminRouteProps> = ({
     return <Navigate to="/" replace />;
   }
 
-  if (role === "student" || (role !== "admin" && role !== "super_admin")) {
+  // Authorize access if user has admin or super_admin role (normalized case-insensitively)
+  if (!isUserAdmin(role)) {
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -99,9 +119,9 @@ const App: React.FC = () => {
   );
   const [authLoading, setAuthLoading] = useState<boolean>(true);
 
-  // Query role from profiles table
+  // Query role from profiles table with normalization
   const fetchUserRole = async (
-    userId: string,
+    userId: string
   ): Promise<"student" | "admin" | "super_admin"> => {
     try {
       const { data, error } = await supabase
@@ -113,19 +133,21 @@ const App: React.FC = () => {
       if (error) {
         console.warn(
           "Could not fetch user role, defaulting to student:",
-          error.message,
+          error.message
         );
         return "student";
       }
 
-      return (data?.role as "student" | "admin" | "super_admin") || "student";
+      return normalizeRole(data?.role);
     } catch {
       return "student";
     }
   };
 
-  // Subscribe to Supabase Auth State Changes
+  // Subscribe to Supabase Auth State Changes and re-query profiles on active session
   useEffect(() => {
+    let isMounted = true;
+
     const initializeAuth = async () => {
       try {
         const {
@@ -133,17 +155,26 @@ const App: React.FC = () => {
         } = await supabase.auth.getSession();
 
         if (session?.user) {
-          setUser({ id: session.user.id, email: session.user.email });
+          if (isMounted) {
+            setUser({ id: session.user.id, email: session.user.email });
+          }
+          // Re-query profiles table directly to get latest live role on page refresh
           const userRole = await fetchUserRole(session.user.id);
-          setRole(userRole);
+          if (isMounted) {
+            setRole(userRole);
+          }
         } else {
-          setUser(null);
-          setRole(null);
+          if (isMounted) {
+            setUser(null);
+            setRole(null);
+          }
         }
       } catch (err) {
         console.error("Auth initialization error:", err);
       } finally {
-        setAuthLoading(false);
+        if (isMounted) {
+          setAuthLoading(false);
+        }
       }
     };
 
@@ -153,18 +184,42 @@ const App: React.FC = () => {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (session?.user) {
-        setUser({ id: session.user.id, email: session.user.email });
+        if (isMounted) {
+          setUser({ id: session.user.id, email: session.user.email });
+        }
+        // Re-query profiles table whenever session changes
         const userRole = await fetchUserRole(session.user.id);
-        setRole(userRole);
+        if (isMounted) {
+          setRole(userRole);
+        }
       } else {
-        setUser(null);
-        setRole(null);
+        if (isMounted) {
+          setUser(null);
+          setRole(null);
+        }
       }
-      setAuthLoading(false);
+      if (isMounted) {
+        setAuthLoading(false);
+      }
     });
 
+    // Re-check profile role when window regains focus to reflect live database updates immediately
+    const handleFocus = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (session?.user && isMounted) {
+        const liveRole = await fetchUserRole(session.user.id);
+        setRole(liveRole);
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+
     return () => {
+      isMounted = false;
       subscription.unsubscribe();
+      window.removeEventListener("focus", handleFocus);
     };
   }, []);
 
@@ -179,6 +234,7 @@ const App: React.FC = () => {
   // - If unauthenticated: ONLY show 'Home'
   // - If authenticated: show 'Home', 'Dashboard', 'CBT Quiz'
   // - If admin/super_admin: also show 'Admin Portal'
+  const hasAdminAccess = isUserAdmin(role);
   const navLinks = [
     { name: "Home", path: "/" },
     ...(user
@@ -187,7 +243,7 @@ const App: React.FC = () => {
           { name: "CBT Quiz", path: "/quiz" },
         ]
       : []),
-    ...(role === "admin" || role === "super_admin"
+    ...(hasAdminAccess
       ? [{ name: "Admin Portal", path: "/admin" }]
       : []),
   ];
@@ -232,9 +288,9 @@ const App: React.FC = () => {
               <div className="flex items-center gap-2 sm:gap-3">
                 {user ? (
                   <div className="hidden md:flex items-center gap-2">
-                    {role && role !== "student" && (
+                    {hasAdminAccess && (
                       <span className="px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wider bg-purple-100 text-purple-700 border border-purple-200">
-                        {role}
+                        {normalizeRole(role) === "super_admin" ? "Super Admin" : "Admin"}
                       </span>
                     )}
                     <span
@@ -326,13 +382,19 @@ const App: React.FC = () => {
               <div className="pt-2 border-t border-slate-100 mt-2">
                 {user ? (
                   <div className="space-y-2">
-                    <div className="text-xs text-slate-500 px-3">
-                      Signed in as{" "}
-                      <strong className="text-slate-800">{user.email}</strong>
+                    <div className="text-xs text-slate-500 px-3 flex items-center justify-between">
+                      <span className="truncate max-w-[180px]">
+                        Signed in as <strong className="text-slate-800">{user.email}</strong>
+                      </span>
+                      {hasAdminAccess && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-100 text-purple-700 border border-purple-200 shrink-0">
+                          {normalizeRole(role) === "super_admin" ? "Super Admin" : "Admin"}
+                        </span>
+                      )}
                     </div>
                     <button
                       onClick={handleSignOut}
-                      className="w-full text-left px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50 rounded-lg"
+                      className="w-full text-left px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50 rounded-lg cursor-pointer"
                     >
                       Sign Out
                     </button>
