@@ -1110,8 +1110,14 @@ export const Admin: React.FC = () => {
               <div className="bg-white rounded-2xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl border border-gray-200 my-8">
                 <div className="flex items-center justify-between pb-4 border-b border-gray-100">
                   <div>
-                    <h3 className="text-lg font-bold text-gray-900">Add New UTME Question</h3>
-                    <p className="text-xs text-gray-500">Provide verified past question stem, options, and explanation.</p>
+                    <h3 className="text-lg font-bold text-gray-900">
+                      {editingQuestionId ? 'Edit UTME Question' : 'Add New UTME Question'}
+                    </h3>
+                    <p className="text-xs text-gray-500">
+                      {editingQuestionId
+                        ? 'Update question stem, diagram, choices, or explanation.'
+                        : 'Provide verified past question stem, options, diagram, and explanation.'}
+                    </p>
                   </div>
                   <button
                     onClick={() => setShowAddQuestionModal(false)}
@@ -1121,7 +1127,7 @@ export const Admin: React.FC = () => {
                   </button>
                 </div>
 
-                <form onSubmit={handleCreateQuestion} className="mt-4 space-y-4 text-xs sm:text-sm">
+                <form onSubmit={handleSaveQuestion} className="mt-4 space-y-4 text-xs sm:text-sm">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-semibold text-gray-700 mb-1">Target Subject</label>
@@ -1161,6 +1167,34 @@ export const Admin: React.FC = () => {
                       onChange={(e) => setNewQuestionText(e.target.value)}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                     />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">
+                      Question Diagram / Image URL (Optional)
+                    </label>
+                    <input
+                      type="url"
+                      placeholder="e.g. https://example.com/diagram.png (leave blank if question has no diagram)"
+                      value={newImageUrl}
+                      onChange={(e) => setNewImageUrl(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                    {newImageUrl.trim() && (
+                      <div className="mt-2 p-2 bg-gray-50 border border-gray-200 rounded-lg flex items-center gap-3">
+                        <img
+                          src={newImageUrl.trim()}
+                          alt="Diagram Preview"
+                          className="h-16 w-auto max-w-[120px] object-contain rounded border border-gray-200 bg-white"
+                          onError={(e) => {
+                            ;(e.target as HTMLImageElement).style.display = 'none'
+                          }}
+                        />
+                        <span className="text-[11px] text-gray-500 truncate">
+                          Diagram preview. Ensure image is publicly accessible.
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Options A through D */}
@@ -1260,7 +1294,9 @@ export const Admin: React.FC = () => {
                       disabled={submittingQuestion}
                       className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-sm transition-colors disabled:opacity-50 cursor-pointer"
                     >
-                      {submittingQuestion ? 'Saving to Database...' : 'Save Question'}
+                      {submittingQuestion
+                        ? (editingQuestionId ? 'Updating...' : 'Saving to Database...')
+                        : (editingQuestionId ? 'Update Question' : 'Save Question')}
                     </button>
                   </div>
                 </form>
@@ -1298,13 +1334,31 @@ export const Admin: React.FC = () => {
                       )}
                     </div>
 
-                    <button
-                      onClick={() => handleDeleteQuestion(q.id)}
-                      className="text-xs text-red-600 hover:text-red-700 font-semibold px-2 py-1 rounded hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors cursor-pointer"
-                    >
-                      Delete
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => handleOpenEditQuestionModal(q)}
+                        className="text-xs text-emerald-600 hover:text-emerald-700 font-semibold px-2 py-1 rounded hover:bg-emerald-50 border border-transparent hover:border-emerald-200 transition-colors cursor-pointer"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDeleteQuestion(q.id)}
+                        className="text-xs text-red-600 hover:text-red-700 font-semibold px-2 py-1 rounded hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </div>
+
+                  {q.image_url && (
+                    <div className="my-2">
+                      <img
+                        src={q.image_url}
+                        alt="Question diagram"
+                        className="max-h-48 max-w-full object-contain rounded-md border border-gray-200 bg-white"
+                      />
+                    </div>
+                  )}
 
                   <p className="text-sm font-medium text-gray-900">{q.question_text}</p>
 
