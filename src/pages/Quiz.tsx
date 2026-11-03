@@ -51,6 +51,12 @@ export const Quiz: React.FC = () => {
     | { selectedSubjectIds?: string[]; selectedSubjects?: Subject[] }
     | undefined
 
+  const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search])
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('demo') === 'true'
+  })
+
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
   const [subjects, setSubjects] = useState<Subject[]>([])
@@ -61,9 +67,13 @@ export const Quiz: React.FC = () => {
   const [markedForReview, setMarkedForReview] = useState<Record<string, boolean>>({})
   const [candidateUser, setCandidateUser] = useState<{ id: string; email?: string } | null>(null)
 
-  // Dynamic Countdown Timer State (defaults to 7200 seconds = 2-hour UTME mock or reads examDuration from jambstar_cbt_settings)
+  // Dynamic Countdown Timer State (defaults to 600s = 10 mins in demo mode, or 7200s = 2-hour UTME mock)
   const [timeLeft, setTimeLeft] = useState<number>(() => {
     try {
+      const params = new URLSearchParams(window.location.search)
+      if (params.get('demo') === 'true') {
+        return 600 // 10 minutes demo timer
+      }
       const stored = localStorage.getItem('jambstar_cbt_settings')
       if (stored) {
         const parsed = JSON.parse(stored)
@@ -80,6 +90,7 @@ export const Quiz: React.FC = () => {
   // Confirmation Modals State
   const [showExitConfirmModal, setShowExitConfirmModal] = useState<boolean>(false)
   const [showSubmitConfirmModal, setShowSubmitConfirmModal] = useState<boolean>(false)
+  const [showDemoCompleteModal, setShowDemoCompleteModal] = useState<boolean>(false)
 
   // Submission & Scoring State
   const [submitting, setSubmitting] = useState<boolean>(false)
@@ -99,19 +110,29 @@ export const Quiz: React.FC = () => {
         const {
           data: { user },
         } = await supabase.auth.getUser()
+
+        const isGuestOrDemo = searchParams.get('demo') === 'true' || !user
+        setIsDemoMode(isGuestOrDemo)
+
+        if (isGuestOrDemo) {
+          setTimeLeft(600)
+        }
+
         if (user) {
           setCandidateUser({ id: user.id, email: user.email })
+        } else {
+          setCandidateUser(null)
         }
 
         let targetSubjects: Subject[] = []
         let targetSubjectIds: string[] = []
 
         // If subjects were passed via React Router location state from Dashboard
-        if (stateData?.selectedSubjects && stateData.selectedSubjects.length > 0) {
+        if (stateData?.selectedSubjects && stateData.selectedSubjects.length > 0 && !isGuestOrDemo) {
           targetSubjects = stateData.selectedSubjects
           targetSubjectIds = stateData.selectedSubjectIds || targetSubjects.map((s) => s.id)
         } else {
-          // Fallback: Fetch default subjects directly from Supabase
+          // Fallback: Fetch default subjects directly from Supabase (English, Maths, etc.)
           const { data: subData, error: subErr } = await supabase
             .from('subjects')
             .select('id, name, code, icon, is_compulsory')
@@ -128,8 +149,6 @@ export const Quiz: React.FC = () => {
           }
         }
 
-        setSubjects(targetSubjects)
-
         // Fetch live questions from Supabase for the candidate's selected subjects
         const { data: questionsData, error: qErr } = await supabase
           .from('questions')
@@ -139,14 +158,25 @@ export const Quiz: React.FC = () => {
 
         if (qErr) throw qErr
 
+        let finalQuestions: Question[] = questionsData || []
+
+        if (isGuestOrDemo) {
+          // Limit total practice question queue to exactly 10 questions in demo mode
+          finalQuestions = finalQuestions.slice(0, 10)
+          const activeSubjIds = new Set(finalQuestions.map((q) => q.subject_id))
+          targetSubjects = targetSubjects.filter((s) => activeSubjIds.has(s.id))
+        }
+
+        setSubjects(targetSubjects)
+
         // Group questions by subject_id
         const grouped: Record<string, Question[]> = {}
-        targetSubjectIds.forEach((id) => {
-          grouped[id] = []
+        targetSubjects.forEach((s) => {
+          grouped[s.id] = []
         })
 
-        if (questionsData && questionsData.length > 0) {
-          questionsData.forEach((q: Question) => {
+        if (finalQuestions.length > 0) {
+          finalQuestions.forEach((q: Question) => {
             if (!grouped[q.subject_id]) {
               grouped[q.subject_id] = []
             }
@@ -205,6 +235,22 @@ export const Quiz: React.FC = () => {
     return Object.values(markedForReview).filter(Boolean).length
   }, [markedForReview])
 
+  // Aggregate score calculation for guest 10-question demo preview
+  const demoScoreSummary = useMemo(() => {
+    let correct = 0
+    let total = 0
+    Object.values(questionsBySubject).forEach((arr) => {
+      arr.forEach((q) => {
+        total++
+        if (selectedAnswers[q.id] === q.correct_option) {
+          correct++
+        }
+      })
+    })
+    const pct = total > 0 ? Math.round((correct / total) * 100) : 0
+    return { correct, total, pct }
+  }, [questionsBySubject, selectedAnswers])
+
   // Format seconds into clean HH:MM:SS string
   const formatTime = (seconds: number): string => {
     const clamped = Math.max(0, seconds)
@@ -219,25 +265,25 @@ export const Quiz: React.FC = () => {
   // Handle option selection (A, B, C, D)
   const handleSelectOption = useCallback(
     (optionKey: string) => {
-      if (!currentQ || reviewMode) return
+      if (!currentQ || reviewMode || showDemoCompleteModal) return
       setSelectedAnswers((prev) => ({
         ...prev,
         [currentQ.id]: optionKey,
       }))
     },
-    [currentQ, reviewMode]
+    [currentQ, reviewMode, showDemoCompleteModal]
   )
 
   // Toggle question review flag
   const handleToggleReview = useCallback(() => {
-    if (!currentQ) return
+    if (!currentQ || showDemoCompleteModal) return
     setMarkedForReview((prev) => ({
       ...prev,
       [currentQ.id]: !prev[currentQ.id],
     }))
-  }, [currentQ])
+  }, [currentQ, showDemoCompleteModal])
 
-  // Seamless Next Navigation: switches to next subject when last question of subject is reached
+  // Seamless Next Navigation: switches to next subject or triggers demo completion modal on final question
   const handleNextQuestion = useCallback(() => {
     if (!isLastQuestionOfSubject) {
       setCurrentQuestionIndex((prev) => prev + 1)
@@ -245,11 +291,15 @@ export const Quiz: React.FC = () => {
       const nextSubj = subjects[currentSubjectIndex + 1]
       setActiveSubjectId(nextSubj.id)
       setCurrentQuestionIndex(0)
+    } else if (isDemoMode) {
+      // Reached the end of the 10-question demo queue
+      setShowDemoCompleteModal(true)
     }
-  }, [isLastQuestionOfSubject, isLastSubject, subjects, currentSubjectIndex])
+  }, [isLastQuestionOfSubject, isLastSubject, subjects, currentSubjectIndex, isDemoMode])
 
   // Seamless Previous Navigation
   const handlePrevQuestion = useCallback(() => {
+    if (showDemoCompleteModal) return
     if (!isFirstQuestionOfSubject) {
       setCurrentQuestionIndex((prev) => prev - 1)
     } else if (!isFirstSubject && subjects[currentSubjectIndex - 1]) {
@@ -258,10 +308,16 @@ export const Quiz: React.FC = () => {
       const prevSubjQuestions = questionsBySubject[prevSubj.id] || []
       setCurrentQuestionIndex(Math.max(0, prevSubjQuestions.length - 1))
     }
-  }, [isFirstQuestionOfSubject, isFirstSubject, subjects, currentSubjectIndex, questionsBySubject])
+  }, [isFirstQuestionOfSubject, isFirstSubject, subjects, currentSubjectIndex, questionsBySubject, showDemoCompleteModal])
 
   // Calculate score and submit to Supabase quiz_results table
   const handleFinalSubmit = useCallback(async () => {
+    if (isDemoMode) {
+      setShowSubmitConfirmModal(false)
+      setShowDemoCompleteModal(true)
+      return
+    }
+
     if (isSubmittingRef.current) return
     isSubmittingRef.current = true
     setSubmitting(true)
@@ -355,10 +411,14 @@ export const Quiz: React.FC = () => {
 
   // Countdown Timer Effect: decrements timeLeft every second when exam is active
   useEffect(() => {
-    // Freeze countdown if loading, already submitted, or in review mode
-    if (loading || reviewMode || submissionResult !== null) return
+    // Freeze countdown if loading, already submitted, in review mode, or demo complete modal open
+    if (loading || reviewMode || submissionResult !== null || showDemoCompleteModal) return
 
     if (timeLeft <= 0) {
+      if (isDemoMode) {
+        setShowDemoCompleteModal(true)
+        return
+      }
       // Auto-submit when time expires
       if (!submitting && !submissionResult && !isSubmittingRef.current) {
         handleFinalSubmit()
@@ -377,13 +437,13 @@ export const Quiz: React.FC = () => {
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [loading, reviewMode, submissionResult, timeLeft, submitting, handleFinalSubmit])
+  }, [loading, reviewMode, submissionResult, timeLeft, submitting, handleFinalSubmit, isDemoMode, showDemoCompleteModal])
 
   // Global Keydown Event Listener for JAMB 8-Key Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 1. Ensure keyboard shortcuts are ignored if reviewMode is active or loading
-      if (reviewMode || loading) return
+      // 1. Ensure keyboard shortcuts are ignored if reviewMode is active, loading, or demo completed
+      if (reviewMode || loading || showDemoCompleteModal) return
 
       // 2. Ensure keyboard shortcuts are ignored if user is typing inside an input field
       const target = e.target as HTMLElement | null
@@ -439,10 +499,14 @@ export const Quiz: React.FC = () => {
         return
       }
 
-      // Map S to trigger exam submission confirmation modal
+      // Map S to trigger exam submission confirmation modal (or demo modal in demo mode)
       if (key === 'S') {
         e.preventDefault()
-        setShowSubmitConfirmModal(true)
+        if (isDemoMode) {
+          setShowDemoCompleteModal(true)
+        } else {
+          setShowSubmitConfirmModal(true)
+        }
         return
       }
     }
@@ -454,6 +518,8 @@ export const Quiz: React.FC = () => {
   }, [
     reviewMode,
     loading,
+    isDemoMode,
+    showDemoCompleteModal,
     showResultModal,
     showExitConfirmModal,
     showSubmitConfirmModal,
@@ -541,13 +607,21 @@ export const Quiz: React.FC = () => {
             className="w-10 h-10 rounded-full object-cover border border-emerald-200 shadow-xs"
           />
           <div>
-            <div className="text-xs uppercase tracking-wider font-semibold text-gray-500">
-              JAMB UTME CBT Simulator
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs uppercase tracking-wider font-semibold text-gray-500">
+                JAMB UTME CBT Simulator
+              </span>
+              {isDemoMode && (
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
+                  Guest Demo Mode (10 Questions)
+                </span>
+              )}
             </div>
             <div className="text-sm sm:text-base font-bold text-gray-900">
               Candidate:{' '}
               <span className="font-mono text-emerald-700">
-                {candidateUser?.email || 'Guest Candidate'}
+                {candidateUser?.email || (isDemoMode ? 'Guest Demo Candidate' : 'Guest Candidate')}
               </span>
             </div>
           </div>
@@ -581,14 +655,14 @@ export const Quiz: React.FC = () => {
           type="button"
           onClick={() => {
             if (reviewMode) {
-              navigate('/dashboard')
+              navigate(isDemoMode ? '/' : '/dashboard')
             } else {
               setShowExitConfirmModal(true)
             }
           }}
           className="text-xs sm:text-sm font-semibold text-gray-500 hover:text-red-700 transition-colors cursor-pointer underline sm:no-underline"
         >
-          {reviewMode ? '← Back to Dashboard' : 'Exit Exam'}
+          {reviewMode ? (isDemoMode ? '← Back to Home' : '← Back to Dashboard') : isDemoMode ? 'Exit Demo' : 'Exit Exam'}
         </button>
       </div>
 
@@ -729,12 +803,14 @@ export const Quiz: React.FC = () => {
                   : '← Previous (P)'}
               </button>
               <button
-                disabled={isLastQuestionOfSubject && isLastSubject}
+                disabled={!isDemoMode && isLastQuestionOfSubject && isLastSubject}
                 onClick={handleNextQuestion}
                 className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
               >
                 {isLastQuestionOfSubject && !isLastSubject
                   ? `Next Subject (${subjects[currentSubjectIndex + 1]?.code || 'Next'}) →`
+                  : isDemoMode && isLastQuestionOfSubject && isLastSubject
+                  ? 'Complete Demo →'
                   : 'Next (N) →'}
               </button>
             </div>
@@ -755,18 +831,24 @@ export const Quiz: React.FC = () => {
 
               {!reviewMode ? (
                 <button
-                  onClick={() => setShowSubmitConfirmModal(true)}
+                  onClick={() => {
+                    if (isDemoMode) {
+                      setShowDemoCompleteModal(true)
+                    } else {
+                      setShowSubmitConfirmModal(true)
+                    }
+                  }}
                   disabled={submitting}
                   className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 shadow-sm disabled:opacity-50 cursor-pointer flex items-center gap-1.5 transition-colors"
                 >
-                  {submitting ? 'Saving Results...' : 'Submit Exam (S)'}
+                  {submitting ? 'Saving Results...' : isDemoMode ? 'Complete Demo (S)' : 'Submit Exam (S)'}
                 </button>
               ) : (
                 <button
-                  onClick={() => navigate('/dashboard')}
+                  onClick={() => navigate(isDemoMode ? '/' : '/dashboard')}
                   className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 shadow-sm cursor-pointer transition-colors"
                 >
-                  Return to Dashboard
+                  {isDemoMode ? 'Return to Home' : 'Return to Dashboard'}
                 </button>
               )}
             </div>
@@ -949,6 +1031,66 @@ export const Quiz: React.FC = () => {
         </div>
       )}
 
+      {/* 10-Question Demo Completion & Gate Modal */}
+      {showDemoCompleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-gray-200 text-center animate-in fade-in zoom-in-95 duration-200">
+            <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 text-3xl flex items-center justify-center mx-auto mb-4 shadow-xs">
+              🎉
+            </div>
+
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-amber-100 text-amber-800 mb-3 border border-amber-300">
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
+              Guest Demo Preview Completed
+            </div>
+
+            <h2 className="text-2xl font-extrabold text-gray-900 tracking-tight">
+              Demo Completed! Ready for the Real UTME Exam?
+            </h2>
+
+            {/* Quick Demo Score Snapshot */}
+            <div className="my-5 p-4 rounded-xl bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-100 text-center">
+              <div className="text-xs uppercase font-bold tracking-wider text-emerald-800">
+                Your Practice Score
+              </div>
+              <div className="text-3xl font-black text-emerald-700 font-mono my-1">
+                {demoScoreSummary.correct} / {demoScoreSummary.total}{' '}
+                <span className="text-lg font-bold text-emerald-500">
+                  ({demoScoreSummary.pct}%)
+                </span>
+              </div>
+              <p className="text-xs text-gray-500">
+                {demoScoreSummary.correct >= 7
+                  ? 'Great performance! You have strong fundamentals for your UTME.'
+                  : 'Good practice effort! Full mock drills will sharpen your exam speed.'}
+              </p>
+            </div>
+
+            <p className="text-sm text-gray-600 leading-relaxed mb-6">
+              You've completed the 10-question practice preview. Create a free JAMBStar account or log in to access full 180-question mock drills, save your performance history, and track subject mastery.
+            </p>
+
+            {/* Actions */}
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={() => navigate('/?auth=signup')}
+                className="flex-1 py-3 px-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition-all cursor-pointer"
+              >
+                Create Account / Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className="py-3 px-5 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-xl text-sm font-semibold transition-colors cursor-pointer"
+              >
+                Exit Demo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Exit Exam Confirmation Modal */}
       {showExitConfirmModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
@@ -957,7 +1099,7 @@ export const Quiz: React.FC = () => {
               ⚠️
             </div>
             <h3 className="text-xl font-extrabold text-gray-900">
-              Abandon & Exit Exam?
+              {isDemoMode ? 'Abandon & Exit Demo?' : 'Abandon & Exit Exam?'}
             </h3>
             <p className="text-sm text-gray-600 mt-2 leading-relaxed">
               Are you sure you want to exit? Your examination timer is active, and any unsubmitted answers or progress in this session will be lost.
@@ -973,10 +1115,10 @@ export const Quiz: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => navigate('/dashboard')}
+                onClick={() => navigate(isDemoMode ? '/' : '/dashboard')}
                 className="flex-1 py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-semibold transition-colors cursor-pointer shadow-xs"
               >
-                Yes, Exit Exam
+                {isDemoMode ? 'Yes, Exit Demo' : 'Yes, Exit Exam'}
               </button>
             </div>
           </div>

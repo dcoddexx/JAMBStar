@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { AdBanner } from "../components/AdBanner";
 
@@ -16,6 +16,7 @@ interface ActiveUser {
 
 export const Landing: React.FC = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const [currentUser, setCurrentUser] = useState<ActiveUser | null>(null);
   const [checkingSession, setCheckingSession] = useState<boolean>(true);
@@ -57,6 +58,18 @@ export const Landing: React.FC = () => {
   const isPasswordValid = passwordCriteria.every(
     (criterion) => criterion.isValid,
   );
+
+  // Sync mode with URL search parameters (e.g., /?auth=signup from route guards)
+  useEffect(() => {
+    const authParam = searchParams.get("auth");
+    if (authParam === "signup") {
+      setMode("signup");
+      setErrorMessage(null);
+    } else if (authParam === "signin") {
+      setMode("signin");
+      setErrorMessage(null);
+    }
+  }, [searchParams]);
 
   // Check active Supabase session
   useEffect(() => {
@@ -275,17 +288,21 @@ export const Landing: React.FC = () => {
             </div>
           </div>
 
-          {/* Guest Shortcut */}
-          <div className="pt-2">
-            <span className="text-xs sm:text-sm text-gray-500 mr-2">
-              Want to explore first?
-            </span>
-            <Link
-              to="/dashboard"
-              className="text-xs sm:text-sm font-semibold text-emerald-600 hover:text-emerald-700 underline"
+          {/* Prominent 10-Question Demo Action */}
+          <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
+            <button
+              type="button"
+              onClick={() => navigate("/quiz?demo=true")}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-xl text-sm sm:text-base font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-md hover:shadow-lg transition-all duration-150 cursor-pointer group"
             >
-              Continue to Subject Selection →
-            </Link>
+              <span>⚡ Try 10-Question Demo</span>
+              <span className="group-hover:translate-x-1 transition-transform">
+                →
+              </span>
+            </button>
+            <span className="text-xs text-gray-500 font-medium text-center sm:text-left">
+              Free instant preview • No account required
+            </span>
           </div>
         </div>
 
@@ -381,6 +398,19 @@ export const Landing: React.FC = () => {
             /* LOGIN / REGISTRATION FORM CARD (Rendered when unauthenticated)    */
             /* ================================================================= */
             <div className="bg-white rounded-2xl border border-gray-200 shadow-lg p-6 sm:p-8">
+              {/* Highlight Banner if redirected from a protected route */}
+              {searchParams.get("auth") === "signup" && (
+                <div className="mb-5 p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5 shadow-2xs animate-in fade-in duration-200">
+                  <span className="text-amber-600 text-base leading-none">🔒</span>
+                  <div className="flex-1">
+                    <strong className="block font-bold">Candidate Account Required</strong>
+                    <span className="text-amber-800">
+                      Sign in or create a free account to access your Dashboard, full mock drills, and score history.
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {/* Mode Switcher Tabs */}
               <div className="flex rounded-xl bg-gray-100 p-1 mb-6">
                 <button

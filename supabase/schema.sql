@@ -101,17 +101,22 @@ CREATE INDEX IF NOT EXISTS idx_quiz_results_timestamp ON public.quiz_results(tim
 -- ==============================================================================
 
 -- Security definer function to avoid RLS recursion when reading profiles
-CREATE OR REPLACE FUNCTION public.is_admin()
+DROP FUNCTION IF EXISTS public.is_admin();
+DROP FUNCTION IF EXISTS public.is_admin(UUID);
+
+CREATE OR REPLACE FUNCTION public.is_admin(user_id UUID DEFAULT auth.uid())
 RETURNS BOOLEAN AS $$
 BEGIN
     RETURN EXISTS (
         SELECT 1
         FROM public.profiles
-        WHERE id = auth.uid()
+        WHERE id = COALESCE(user_id, auth.uid())
           AND role IN ('admin', 'super_admin')
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public;
+
+COMMENT ON FUNCTION public.is_admin(UUID) IS 'Returns true if the specified user (or auth.uid()) has an admin or super_admin role. Runs as SECURITY DEFINER to bypass RLS recursion on public.profiles.';
 
 -- ==============================================================================
 -- 5. ROW LEVEL SECURITY (RLS) POLICIES
@@ -139,13 +144,7 @@ CREATE POLICY "Admins can view all profiles"
     ON public.profiles 
     FOR SELECT 
     TO authenticated
-    USING (
-        public.is_admin() OR
-        EXISTS (
-            SELECT 1 FROM public.profiles 
-            WHERE id = auth.uid() AND role IN ('admin', 'super_admin')
-        )
-    );
+    USING (public.is_admin(auth.uid()));
 
 DROP POLICY IF EXISTS "Users can insert own profile" ON public.profiles;
 CREATE POLICY "Users can insert own profile"
@@ -160,15 +159,15 @@ CREATE POLICY "Users and admins can update profiles"
     ON public.profiles
     FOR UPDATE
     TO authenticated
-    USING (auth.uid() = id OR public.is_admin())
-    WITH CHECK (auth.uid() = id OR public.is_admin());
+    USING (auth.uid() = id OR public.is_admin(auth.uid()))
+    WITH CHECK (auth.uid() = id OR public.is_admin(auth.uid()));
 
 DROP POLICY IF EXISTS "Super admins can delete profiles" ON public.profiles;
 CREATE POLICY "Super admins can delete profiles"
     ON public.profiles
     FOR DELETE
     TO authenticated
-    USING (public.is_admin());
+    USING (public.is_admin(auth.uid()));
 
 -- ------------------------------------------------------------------------------
 -- RLS: subjects
@@ -186,22 +185,22 @@ CREATE POLICY "Allow admins to insert subjects"
     ON public.subjects
     FOR INSERT
     TO authenticated
-    WITH CHECK (public.is_admin());
+    WITH CHECK (public.is_admin(auth.uid()));
 
 DROP POLICY IF EXISTS "Allow admins to update subjects" ON public.subjects;
 CREATE POLICY "Allow admins to update subjects"
     ON public.subjects
     FOR UPDATE
     TO authenticated
-    USING (public.is_admin())
-    WITH CHECK (public.is_admin());
+    USING (public.is_admin(auth.uid()))
+    WITH CHECK (public.is_admin(auth.uid()));
 
 DROP POLICY IF EXISTS "Allow admins to delete subjects" ON public.subjects;
 CREATE POLICY "Allow admins to delete subjects"
     ON public.subjects
     FOR DELETE
     TO authenticated
-    USING (public.is_admin());
+    USING (public.is_admin(auth.uid()));
 
 -- ------------------------------------------------------------------------------
 -- RLS: questions
@@ -221,22 +220,22 @@ CREATE POLICY "Allow admins to insert questions"
     ON public.questions
     FOR INSERT
     TO authenticated
-    WITH CHECK (public.is_admin());
+    WITH CHECK (public.is_admin(auth.uid()));
 
 DROP POLICY IF EXISTS "Allow admins to update questions" ON public.questions;
 CREATE POLICY "Allow admins to update questions"
     ON public.questions
     FOR UPDATE
     TO authenticated
-    USING (public.is_admin())
-    WITH CHECK (public.is_admin());
+    USING (public.is_admin(auth.uid()))
+    WITH CHECK (public.is_admin(auth.uid()));
 
 DROP POLICY IF EXISTS "Allow admins to delete questions" ON public.questions;
 CREATE POLICY "Allow admins to delete questions"
     ON public.questions
     FOR DELETE
     TO authenticated
-    USING (public.is_admin());
+    USING (public.is_admin(auth.uid()));
 
 -- ------------------------------------------------------------------------------
 -- RLS: quiz_results
