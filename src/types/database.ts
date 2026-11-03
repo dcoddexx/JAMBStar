@@ -137,6 +137,67 @@ export interface Database {
           timestamp?: string
         }
       }
+      support_tickets: {
+        Row: {
+          id: string
+          user_id: string | null
+          guest_name: string | null
+          guest_email: string | null
+          subject: string
+          category: string
+          status: 'open' | 'resolved'
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id?: string | null
+          guest_name?: string | null
+          guest_email?: string | null
+          subject: string
+          category: string
+          status?: 'open' | 'resolved'
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string | null
+          guest_name?: string | null
+          guest_email?: string | null
+          subject?: string
+          category?: string
+          status?: 'open' | 'resolved'
+          created_at?: string
+          updated_at?: string
+        }
+      }
+      ticket_messages: {
+        Row: {
+          id: string
+          ticket_id: string
+          sender_id: string | null
+          sender_name: string | null
+          message: string
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          ticket_id: string
+          sender_id?: string | null
+          sender_name?: string | null
+          message: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          ticket_id?: string
+          sender_id?: string | null
+          sender_name?: string | null
+          message?: string
+          created_at?: string
+        }
+      }
     }
   }
 }

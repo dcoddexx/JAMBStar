@@ -86,6 +86,51 @@ CREATE TABLE IF NOT EXISTS public.quiz_results (
 
 COMMENT ON TABLE public.quiz_results IS 'Audit trail of user CBT quiz completions and scores.';
 
+-- ------------------------------------------------------------------------------
+-- Table: support_tickets
+-- In-app support tickets submitted by candidates or guest visitors
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.support_tickets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    guest_name TEXT,
+    guest_email TEXT,
+    subject TEXT NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('Technical', 'Payment', 'Exam Inquiry', 'General', 'Question Bank Feedback', 'Candidate Support', 'Other')),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+-- Foreign key to profiles for PostgREST relational embedding
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_support_tickets_profile'
+    ) THEN
+        ALTER TABLE public.support_tickets
+        ADD CONSTRAINT fk_support_tickets_profile
+        FOREIGN KEY (user_id) REFERENCES public.profiles(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+COMMENT ON TABLE public.support_tickets IS 'In-app support tickets submitted by candidates and platform visitors.';
+
+-- ------------------------------------------------------------------------------
+-- Table: ticket_messages
+-- Threaded conversation messages and admin replies for support tickets
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.ticket_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticket_id UUID NOT NULL REFERENCES public.support_tickets(id) ON DELETE CASCADE,
+    sender_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
+    sender_name TEXT,
+    message TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+COMMENT ON TABLE public.ticket_messages IS 'Threaded messages and replies on support tickets.';
+
 -- ==============================================================================
 -- 3. INDEXES FOR PERFORMANCE
 -- ==============================================================================
@@ -95,6 +140,11 @@ CREATE INDEX IF NOT EXISTS idx_questions_subject_id ON public.questions(subject_
 CREATE INDEX IF NOT EXISTS idx_quiz_results_user_id ON public.quiz_results(user_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_results_subject_id ON public.quiz_results(subject_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_results_timestamp ON public.quiz_results(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_user_id ON public.support_tickets(user_id);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON public.support_tickets(status);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_created_at ON public.support_tickets(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ticket_messages_ticket_id ON public.ticket_messages(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_ticket_messages_created_at ON public.ticket_messages(created_at ASC);
 
 -- ==============================================================================
 -- 4. HELPER FUNCTIONS FOR SECURITY & ROLE CHECKING
@@ -127,6 +177,8 @@ ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.subjects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.quiz_results ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.support_tickets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ticket_messages ENABLE ROW LEVEL SECURITY;
 
 -- ------------------------------------------------------------------------------
 -- RLS: profiles
@@ -254,6 +306,64 @@ CREATE POLICY "Users can insert own quiz results"
     FOR INSERT
     TO authenticated
     WITH CHECK (auth.uid() = user_id);
+
+-- ------------------------------------------------------------------------------
+-- RLS: support_tickets
+-- Candidates view/insert/update own tickets; Admins (is_admin()) can manage all
+-- ------------------------------------------------------------------------------
+DROP POLICY IF EXISTS "Candidates and admins can view support tickets" ON public.support_tickets;
+CREATE POLICY "Candidates and admins can view support tickets"
+    ON public.support_tickets
+    FOR SELECT
+    TO authenticated
+    USING (auth.uid() = user_id OR public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "Anyone can insert support tickets" ON public.support_tickets;
+CREATE POLICY "Anyone can insert support tickets"
+    ON public.support_tickets
+    FOR INSERT
+    TO anon, authenticated
+    WITH CHECK (auth.uid() IS NULL OR auth.uid() = user_id OR public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "Candidates and admins can update support tickets" ON public.support_tickets;
+CREATE POLICY "Candidates and admins can update support tickets"
+    ON public.support_tickets
+    FOR UPDATE
+    TO authenticated
+    USING (auth.uid() = user_id OR public.is_admin(auth.uid()))
+    WITH CHECK (auth.uid() = user_id OR public.is_admin(auth.uid()));
+
+-- ------------------------------------------------------------------------------
+-- RLS: ticket_messages
+-- Candidates view/insert messages on their own tickets; Admins can reply to all
+-- ------------------------------------------------------------------------------
+DROP POLICY IF EXISTS "Users can view messages for own tickets or as admin" ON public.ticket_messages;
+CREATE POLICY "Users can view messages for own tickets or as admin"
+    ON public.ticket_messages
+    FOR SELECT
+    TO authenticated
+    USING (
+        public.is_admin(auth.uid())
+        OR EXISTS (
+            SELECT 1 FROM public.support_tickets
+            WHERE id = ticket_messages.ticket_id
+              AND user_id = auth.uid()
+        )
+    );
+
+DROP POLICY IF EXISTS "Users and admins can insert ticket messages" ON public.ticket_messages;
+CREATE POLICY "Users and admins can insert ticket messages"
+    ON public.ticket_messages
+    FOR INSERT
+    TO anon, authenticated
+    WITH CHECK (
+        public.is_admin(auth.uid())
+        OR EXISTS (
+            SELECT 1 FROM public.support_tickets
+            WHERE id = ticket_messages.ticket_id
+              AND (user_id = auth.uid() OR user_id IS NULL)
+        )
+    );
 
 -- ==============================================================================
 -- 6. AUTOMATED PROFILE CREATION ON SIGNUP

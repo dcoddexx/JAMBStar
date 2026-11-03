@@ -4,12 +4,16 @@ import {
   Routes,
   Route,
   Navigate,
+  Link,
 } from "react-router-dom";
 import { supabase } from "./lib/supabase";
 import Landing from "./pages/Landing";
 import Dashboard from "./pages/Dashboard";
 import Quiz from "./pages/Quiz";
 import Admin from "./pages/Admin";
+import PrivacyPolicy from "./pages/PrivacyPolicy";
+import TermsOfService from "./pages/TermsOfService";
+import Contact from "./pages/Contact";
 import Navbar, { normalizeRole, isUserAdmin } from "./components/Navbar";
 
 export { normalizeRole, isUserAdmin };
@@ -246,22 +250,37 @@ const App: React.FC = () => {
               }
             />
 
+            {/* Google AdSense Compliance & Legal Pages */}
+            <Route path="/privacy" element={<PrivacyPolicy />} />
+            <Route path="/terms" element={<TermsOfService />} />
+            <Route path="/contact" element={<Contact />} />
+
             {/* Fallback route */}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>
 
         {/* Responsive Footer */}
-        <footer className="border-t border-slate-200 bg-white py-6">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs sm:text-sm text-slate-500">
+        <footer className="border-t border-slate-200 bg-white py-6 sm:py-8 mt-auto">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-4 text-xs sm:text-sm text-slate-500">
             <div className="flex items-center gap-2">
               <span className="font-bold text-slate-800">JAMBStar</span>
               <span>•</span>
               <span>JAMB UTME CBT Preparation System</span>
             </div>
-            <p>
-              © {new Date().getFullYear()} JAMBStar. Built for Nigerian UTME
-              candidates.
+            <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6 font-medium text-slate-600">
+              <Link to="/privacy" className="hover:text-emerald-600 transition-colors">
+                Privacy Policy
+              </Link>
+              <Link to="/terms" className="hover:text-emerald-600 transition-colors">
+                Terms of Service
+              </Link>
+              <Link to="/contact" className="hover:text-emerald-600 transition-colors">
+                Contact & About Us
+              </Link>
+            </div>
+            <p className="text-center md:text-right text-xs text-slate-400">
+              © {new Date().getFullYear()} JAMBStar. Built for Nigerian UTME candidates.
             </p>
           </div>
         </footer>

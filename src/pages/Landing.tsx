@@ -766,6 +766,26 @@ export const Landing: React.FC = () => {
           </p>
         </div>
       </div>
+
+      {/* Google AdSense Crawler Compliance & Legal Navigation Section */}
+      <div className="mt-16 pt-8 border-t border-gray-200 w-full flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-gray-500">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-gray-800">JAMBStar Preparatory Portal</span>
+          <span>•</span>
+          <span>Independent UTME Simulation</span>
+        </div>
+        <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6 font-medium text-gray-600">
+          <Link to="/privacy" className="hover:text-emerald-600 transition-colors">
+            Privacy Policy
+          </Link>
+          <Link to="/terms" className="hover:text-emerald-600 transition-colors">
+            Terms of Service
+          </Link>
+          <Link to="/contact" className="hover:text-emerald-600 transition-colors">
+            Contact & About Us
+          </Link>
+        </div>
+      </div>
     </div>
   );
 };

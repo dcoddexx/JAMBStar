@@ -58,7 +58,34 @@ export interface ParsedCSVQuestion {
   validationError?: string
 }
 
-type AdminTab = 'analytics' | 'questions' | 'users' | 'settings'
+export interface SupportTicketWithProfile {
+  id: string
+  user_id: string | null
+  guest_name: string | null
+  guest_email: string | null
+  subject: string
+  category: string
+  status: 'open' | 'resolved'
+  created_at: string
+  updated_at: string
+  candidate?: {
+    full_name: string | null
+    email?: string | null
+    track?: string | null
+    role?: string | null
+  } | null
+}
+
+export interface AdminTicketMessage {
+  id: string
+  ticket_id: string
+  sender_id: string | null
+  sender_name: string | null
+  message: string
+  created_at: string
+}
+
+type AdminTab = 'analytics' | 'questions' | 'support' | 'users' | 'settings'
 
 export const Admin: React.FC = () => {
   // Navigation & Authentication
@@ -87,7 +114,9 @@ export const Admin: React.FC = () => {
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>('')
   const [questions, setQuestions] = useState<Question[]>([])
-  const [allQuestionsSummary, setAllQuestionsSummary] = useState<{ id: string; subject_id: string; exam_year: number | null }[]>([])
+  const [subjectQuestionCounts, setSubjectQuestionCounts] = useState<Record<string, number>>({})
+  const [totalQuestionsCount, setTotalQuestionsCount] = useState<number>(0)
+  const [loadingSubjectCounts, setLoadingSubjectCounts] = useState<boolean>(false)
   const [loadingQuestions, setLoadingQuestions] = useState<boolean>(false)
   const [questionSearch, setQuestionSearch] = useState<string>('')
   const [examYearFilter, setExamYearFilter] = useState<string>('All')
@@ -122,6 +151,20 @@ export const Admin: React.FC = () => {
   const [parsingCsv, setParsingCsv] = useState<boolean>(false)
   const [uploadingCsv, setUploadingCsv] = useState<boolean>(false)
   const [bulkError, setBulkError] = useState<string | null>(null)
+
+  // Support Inbox State (Admin & Super Admin)
+  const [supportTickets, setSupportTickets] = useState<SupportTicketWithProfile[]>([])
+  const [loadingSupportTickets, setLoadingSupportTickets] = useState<boolean>(false)
+  const [supportStatusFilter, setSupportStatusFilter] = useState<'open' | 'all' | 'resolved'>('open')
+  const [supportCategoryFilter, setSupportCategoryFilter] = useState<string>('All')
+  const [supportSearch, setSupportSearch] = useState<string>('')
+  const [selectedAdminTicket, setSelectedAdminTicket] = useState<SupportTicketWithProfile | null>(null)
+  const [adminTicketMessages, setAdminTicketMessages] = useState<AdminTicketMessage[]>([])
+  const [loadingAdminMessages, setLoadingAdminMessages] = useState<boolean>(false)
+  const [adminReplyText, setAdminReplyText] = useState<string>('')
+  const [sendingAdminReply, setSendingAdminReply] = useState<boolean>(false)
+  const [updatingTicketStatus, setUpdatingTicketStatus] = useState<boolean>(false)
+  const [supportActionMsg, setSupportActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   // Global CBT Settings State (Super Admin Only)
   const [cbtSettings, setCbtSettings] = useState<CBTSettings>(() => {
@@ -212,7 +255,56 @@ export const Admin: React.FC = () => {
     }
   }
 
-  // Load Subjects
+  // Load Dynamic Exact Question Counts Per Subject (Supabase exact count query)
+  const fetchExactSubjectCounts = async (subjectsList?: Subject[]) => {
+    const list = subjectsList && subjectsList.length > 0 ? subjectsList : subjects
+    if (!list || list.length === 0) return
+
+    setLoadingSubjectCounts(true)
+    try {
+      // 1. Query exact count dynamically per subject via Supabase head query
+      const countPromises = list.map(async (subj) => {
+        const { count, error } = await supabase
+          .from('questions')
+          .select('*', { count: 'exact', head: true })
+          .eq('subject_id', subj.id)
+
+        if (error) {
+          console.error(`Error counting questions for subject ${subj.id} (${subj.name}):`, error)
+          return { id: subj.id, count: 0 }
+        }
+        return { id: subj.id, count: count ?? 0 }
+      })
+
+      // 2. Query exact total questions count across the entire questions table
+      const totalPromise = supabase
+        .from('questions')
+        .select('*', { count: 'exact', head: true })
+
+      const [countsResults, totalRes] = await Promise.all([
+        Promise.all(countPromises),
+        totalPromise,
+      ])
+
+      const countsMap: Record<string, number> = {}
+      countsResults.forEach(({ id, count }) => {
+        countsMap[id] = count
+      })
+      setSubjectQuestionCounts(countsMap)
+
+      if (totalRes.count !== null && totalRes.count !== undefined) {
+        setTotalQuestionsCount(totalRes.count)
+      } else {
+        setTotalQuestionsCount(Object.values(countsMap).reduce((a, b) => a + b, 0))
+      }
+    } catch (err) {
+      console.error('Error fetching exact question counts:', err)
+    } finally {
+      setLoadingSubjectCounts(false)
+    }
+  }
+
+  // Load Subjects and calculate exact question counts immediately upon page load
   const fetchSubjects = async () => {
     try {
       const { data, error } = await supabase
@@ -225,24 +317,12 @@ export const Admin: React.FC = () => {
         setSubjects(data)
         if (!selectedSubjectId) setSelectedSubjectId(data[0].id)
         if (!newSubjectId) setNewSubjectId(data[0].id)
+        // Immediately fetch exact dynamic question counts for all subjects
+        await fetchExactSubjectCounts(data)
       }
     } catch (err: unknown) {
       const e = err as Error
       console.error('Error fetching subjects:', e)
-    }
-  }
-
-  // Load Question Counts & Summaries Across All Subjects
-  const fetchAllQuestionsSummary = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('questions')
-        .select('id, subject_id, exam_year')
-
-      if (error) throw error
-      setAllQuestionsSummary(data || [])
-    } catch (err) {
-      console.error('Error fetching questions summary:', err)
     }
   }
 
@@ -251,14 +331,17 @@ export const Admin: React.FC = () => {
     if (!subjectId) return
     setLoadingQuestions(true)
     try {
-      const { data, error } = await supabase
+      const { data, count, error } = await supabase
         .from('questions')
-        .select('*')
+        .select('*', { count: 'exact' })
         .eq('subject_id', subjectId)
         .order('created_at', { ascending: false })
 
       if (error) throw error
       setQuestions(data || [])
+      if (count !== null && count !== undefined) {
+        setSubjectQuestionCounts((prev) => ({ ...prev, [subjectId]: count }))
+      }
     } catch (err: unknown) {
       const e = err as Error
       console.error('Error fetching questions:', e)
@@ -267,11 +350,175 @@ export const Admin: React.FC = () => {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Support Inbox Engine (Admin & Super Admin)
+  // ---------------------------------------------------------------------------
+
+  // Load All Support Tickets across platform with Candidate Profile Enrichment
+  const fetchSupportTickets = async () => {
+    setLoadingSupportTickets(true)
+    try {
+      const { data, error } = await supabase
+        .from('support_tickets')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+
+      const rawTickets = data || []
+      const userIds = Array.from(new Set(rawTickets.map((t) => t.user_id).filter(Boolean))) as string[]
+
+      const profileMap: Record<string, { full_name: string | null; track: string; role: string }> = {}
+      if (userIds.length > 0) {
+        const { data: profs } = await supabase
+          .from('profiles')
+          .select('id, full_name, track, role')
+          .in('id', userIds)
+
+        if (profs) {
+          profs.forEach((p) => {
+            profileMap[p.id] = p
+          })
+        }
+      }
+
+      const enriched: SupportTicketWithProfile[] = rawTickets.map((t) => {
+        const prof = t.user_id ? profileMap[t.user_id] : null
+        return {
+          ...t,
+          candidate: prof
+            ? {
+                full_name: prof.full_name,
+                email: undefined,
+                track: prof.track,
+                role: prof.role,
+              }
+            : null,
+        }
+      })
+
+      setSupportTickets(enriched)
+
+      // Keep active ticket fresh if already chosen
+      if (selectedAdminTicket) {
+        const updated = enriched.find((t) => t.id === selectedAdminTicket.id)
+        if (updated) setSelectedAdminTicket(updated)
+      } else if (enriched.length > 0) {
+        handleSelectAdminTicket(enriched[0])
+      }
+    } catch (err: unknown) {
+      const e = err as Error
+      console.error('Error fetching support tickets for admin:', e)
+    } finally {
+      setLoadingSupportTickets(false)
+    }
+  }
+
+  // Load conversation messages for selected ticket
+  const fetchAdminTicketMessages = async (ticketId: string) => {
+    setLoadingAdminMessages(true)
+    try {
+      const { data, error } = await supabase
+        .from('ticket_messages')
+        .select('*')
+        .eq('ticket_id', ticketId)
+        .order('created_at', { ascending: true })
+
+      if (error) throw error
+      setAdminTicketMessages(data || [])
+    } catch (err) {
+      console.error('Error fetching admin ticket messages:', err)
+    } finally {
+      setLoadingAdminMessages(false)
+    }
+  }
+
+  const handleSelectAdminTicket = (ticket: SupportTicketWithProfile) => {
+    setSelectedAdminTicket(ticket)
+    setAdminReplyText('')
+    setSupportActionMsg(null)
+    fetchAdminTicketMessages(ticket.id)
+  }
+
+  // Admin reply handler
+  const handleSendAdminReply = async () => {
+    if (!selectedAdminTicket || !adminReplyText.trim() || !currentUser) return
+    setSendingAdminReply(true)
+    setSupportActionMsg(null)
+    try {
+      const staffLabel = currentUser.full_name || 'Staff Member'
+      const roleTag = isSuperAdmin ? 'Super Admin' : 'Admin'
+      const senderDisplayName = `🛡️ ${staffLabel} (${roleTag})`
+
+      const { data, error } = await supabase
+        .from('ticket_messages')
+        .insert({
+          ticket_id: selectedAdminTicket.id,
+          sender_id: currentUser.id,
+          sender_name: senderDisplayName,
+          message: adminReplyText.trim(),
+        })
+        .select()
+        .single()
+
+      if (error) throw error
+
+      setAdminTicketMessages((prev) => [...prev, data as AdminTicketMessage])
+      setAdminReplyText('')
+
+      // Touch ticket updated_at
+      await supabase
+        .from('support_tickets')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', selectedAdminTicket.id)
+
+      setSupportActionMsg({ type: 'success', text: 'Admin reply posted to conversation thread.' })
+    } catch (err: unknown) {
+      const e = err as Error
+      setSupportActionMsg({ type: 'error', text: `Failed to send reply: ${e.message}` })
+    } finally {
+      setSendingAdminReply(false)
+    }
+  }
+
+  // Admin toggle ticket status (Mark as Resolved / Reopen)
+  const handleToggleTicketStatus = async () => {
+    if (!selectedAdminTicket) return
+    const newStatus: 'open' | 'resolved' = selectedAdminTicket.status === 'open' ? 'resolved' : 'open'
+    setUpdatingTicketStatus(true)
+    setSupportActionMsg(null)
+    try {
+      const { error } = await supabase
+        .from('support_tickets')
+        .update({
+          status: newStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', selectedAdminTicket.id)
+
+      if (error) throw error
+
+      setSelectedAdminTicket((prev) => (prev ? { ...prev, status: newStatus } : null))
+      setSupportTickets((prev) =>
+        prev.map((t) => (t.id === selectedAdminTicket.id ? { ...t, status: newStatus } : t))
+      )
+      setSupportActionMsg({
+        type: 'success',
+        text: `Ticket successfully marked as ${newStatus === 'resolved' ? 'Resolved' : 'Open'}.`,
+      })
+    } catch (err: unknown) {
+      const e = err as Error
+      setSupportActionMsg({ type: 'error', text: `Failed to update status: ${e.message}` })
+    } finally {
+      setUpdatingTicketStatus(false)
+    }
+  }
+
   useEffect(() => {
     fetchCurrentUser()
     fetchProfiles()
     fetchSubjects()
-    fetchAllQuestionsSummary()
+    fetchSupportTickets()
   }, [])
 
   useEffect(() => {
@@ -391,7 +638,7 @@ export const Admin: React.FC = () => {
       if (error) throw error
 
       setQuestions([])
-      fetchAllQuestionsSummary()
+      await fetchExactSubjectCounts()
       setShowBulkWipeModal(false)
       setWipeConfirmationInput('')
       setQuestionActionMsg({
@@ -480,6 +727,7 @@ export const Admin: React.FC = () => {
             prev.map((q) => (q.id === editingQuestionId ? (data as Question) : q))
           )
         }
+        await fetchExactSubjectCounts()
         setQuestionActionMsg({ type: 'success', text: 'Question updated successfully!' })
       } else {
         const { data, error } = await supabase
@@ -493,7 +741,7 @@ export const Admin: React.FC = () => {
         if (data && data.subject_id === selectedSubjectId) {
           setQuestions((prev) => [data as Question, ...prev])
         }
-        fetchAllQuestionsSummary()
+        await fetchExactSubjectCounts()
         setQuestionActionMsg({ type: 'success', text: 'New question successfully added to question bank!' })
       }
 
@@ -527,7 +775,7 @@ export const Admin: React.FC = () => {
       if (error) throw error
 
       setQuestions((prev) => prev.filter((q) => q.id !== questionId))
-      fetchAllQuestionsSummary()
+      await fetchExactSubjectCounts()
       setQuestionActionMsg({ type: 'success', text: 'Question deleted successfully.' })
     } catch (err: unknown) {
       const e = err as Error
@@ -592,52 +840,97 @@ export const Admin: React.FC = () => {
   // ---------------------------------------------------------------------------
   // Robust CSV Parsing & Subject Mapping Engine
   // ---------------------------------------------------------------------------
-  const parseCSVRows = (text: string): string[][] => {
-    const rows: string[][] = []
-    let row: string[] = []
-    let entry = ''
+  // State-machine single-line parser respecting double quotes and escaped quotes ("")
+  const parseCSVLine = (line: string): string[] => {
+    const fields: string[] = []
+    let current = ''
     let inQuotes = false
 
-    for (let i = 0; i < text.length; i++) {
-      const char = text[i]
-      const nextChar = text[i + 1]
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i]
 
-      if (char === '"' || char === "'") {
-        if (inQuotes && nextChar === char) {
-          entry += char
+      if (char === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          // Escaped double quote inside quoted field ("")
+          current += '"'
           i++
         } else {
+          // Toggle quote state
           inQuotes = !inQuotes
         }
       } else if (char === ',' && !inQuotes) {
-        row.push(entry.trim())
-        entry = ''
-      } else if ((char === '\r' || char === '\n') && !inQuotes) {
-        if (char === '\r' && nextChar === '\n') {
-          i++
-        }
-        row.push(entry.trim())
-        if (row.some((cell) => cell.length > 0)) {
-          rows.push(row)
-        }
-        row = []
-        entry = ''
+        fields.push(current.trim())
+        current = ''
       } else {
-        entry += char
+        current += char
       }
     }
-    if (entry.length > 0 || row.length > 0) {
-      row.push(entry.trim())
-      if (row.some((cell) => cell.length > 0)) {
-        rows.push(row)
+
+    fields.push(current.trim())
+    return fields
+  }
+
+  const parseCSVRows = (text: string): string[][] => {
+    if (!text || text.trim().length === 0) return []
+
+    // Strip UTF-8 Byte Order Mark (BOM) if present (common in Excel exports)
+    const cleanText = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+
+    // Universal Line Endings: handle both Windows (\r\n) and Unix (\n) line endings
+    const rawLines = cleanText.split(/\r?\n/)
+    const assembledLines: string[] = []
+    let currentLine = ''
+    let insideQuotes = false
+
+    for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i]
+      if (insideQuotes) {
+        currentLine += '\n' + line
+      } else {
+        currentLine = line
+      }
+
+      // Count double quotes to check if quotes are balanced
+      let quoteCount = 0
+      for (let j = 0; j < currentLine.length; j++) {
+        if (currentLine[j] === '"') {
+          quoteCount++
+        }
+      }
+      insideQuotes = quoteCount % 2 !== 0
+
+      if (!insideQuotes) {
+        // Clean Empty Rows: filter out completely empty or blank lines
+        if (currentLine.trim().length > 0) {
+          assembledLines.push(currentLine)
+        }
+        currentLine = ''
       }
     }
+
+    // Capture any trailing row content
+    if (currentLine.trim().length > 0) {
+      assembledLines.push(currentLine)
+    }
+
+    // Parse each assembled line using the state-machine line parser
+    const rows: string[][] = []
+    for (const rowText of assembledLines) {
+      const cols = parseCSVLine(rowText)
+      // Clean Empty Rows: Ensure row has content and is not completely empty
+      if (cols.length > 0 && cols.some((col) => col.trim().length > 0)) {
+        rows.push(cols)
+      }
+    }
+
     return rows
   }
 
   const findSubjectMatch = (rawSubject: string): Subject | null => {
     if (!rawSubject || subjects.length === 0) return null
     const clean = rawSubject.toLowerCase().replace(/[^a-z0-9]/g, '')
+    if (!clean) return null
+
     // 1. Exact name or code match
     const exact = subjects.find(
       (s) =>
@@ -646,7 +939,31 @@ export const Admin: React.FC = () => {
     )
     if (exact) return exact
 
-    // 2. Contains match
+    // 2. Comprehensive Nigerian UTME Subject Alias Map (handles common naming variations)
+    const ALIAS_MAP: Record<string, string[]> = {
+      useofenglish: ['english', 'useofeng', 'eng', 'generalenglish', 'useofenglishlanguage', 'englishlanguage', 'englang'],
+      mathematics: ['maths', 'math', 'mth', 'generalmaths', 'generalmathematics', 'puremaths'],
+      physics: ['phy', 'phys', 'physicsutme'],
+      chemistry: ['chem', 'chm'],
+      biology: ['bio', 'biol'],
+      economics: ['econ', 'eco'],
+      government: ['gov', 'govt'],
+      literatureinenglish: ['literature', 'lit', 'litineng', 'englishlit', 'englishliterature'],
+      commerce: ['comm', 'com'],
+      principlesofaccounts: ['accounting', 'accounts', 'account', 'acc', 'financialaccounting', 'principlesofaccounting'],
+      agriculturalscience: ['agric', 'agricscience', 'agr', 'agriculture'],
+      christianreligiousknowledge: ['crk', 'crs', 'christianreligiousexamination', 'christianreligiousstudies', 'christianreligion', 'crstudies'],
+    }
+
+    for (const s of subjects) {
+      const sNorm = s.name.toLowerCase().replace(/[^a-z0-9]/g, '')
+      const aliases = ALIAS_MAP[sNorm] || []
+      if (aliases.includes(clean)) {
+        return s
+      }
+    }
+
+    // 3. Contains match
     const contains = subjects.find((s) => {
       const sClean = s.name.toLowerCase().replace(/[^a-z0-9]/g, '')
       return sClean.includes(clean) || clean.includes(sClean)
@@ -689,19 +1006,26 @@ export const Admin: React.FC = () => {
 
         for (let i = 1; i < rawRows.length; i++) {
           const r = rawRows[i]
+          // Clean Empty Rows: skip rows that are completely empty
           if (r.length === 0 || r.every((c) => c.trim() === '')) continue
 
+          // Pad row to ensure 9 columns so out-of-bounds access never returns undefined
+          while (r.length < 9) {
+            r.push('')
+          }
+
           const rowNum = i + 1
-          const rawSubject = r[0] || ''
-          const questionText = r[1] || ''
-          const optionA = r[2] || ''
-          const optionB = r[3] || ''
-          const optionC = r[4] || ''
-          const optionD = r[5] || ''
-          const rawCorrect = (r[6] || '').toUpperCase().trim()
-          const explanation = r[7] || ''
-          const rawImageUrl = r[8] || ''
-          const imageUrl = rawImageUrl.trim() === '' ? null : rawImageUrl.trim()
+          // Trim Whitespace: trim all fields and normalize correct option to uppercase
+          const rawSubject = (r[0] || '').trim()
+          const questionText = (r[1] || '').trim()
+          const optionA = (r[2] || '').trim()
+          const optionB = (r[3] || '').trim()
+          const optionC = (r[4] || '').trim()
+          const optionD = (r[5] || '').trim()
+          const rawCorrect = (r[6] || '').trim().toUpperCase()
+          const explanation = (r[7] || '').trim()
+          const rawImageUrl = (r[8] || '').trim()
+          const imageUrl = rawImageUrl === '' ? null : rawImageUrl
 
           const matchedSub = findSubjectMatch(rawSubject)
 
@@ -711,10 +1035,10 @@ export const Admin: React.FC = () => {
           if (!matchedSub) {
             isValid = false
             validationError = `Subject "${rawSubject}" could not be mapped to any registered subject.`
-          } else if (!questionText.trim()) {
+          } else if (!questionText) {
             isValid = false
             validationError = 'Question text cannot be blank.'
-          } else if (!optionA.trim() || !optionB.trim() || !optionC.trim() || !optionD.trim()) {
+          } else if (!optionA || !optionB || !optionC || !optionD) {
             isValid = false
             validationError = 'All 4 options (A, B, C, D) are required.'
           } else if (!['A', 'B', 'C', 'D'].includes(rawCorrect)) {
@@ -791,7 +1115,7 @@ export const Admin: React.FC = () => {
       if (selectedSubjectId) {
         fetchQuestions(selectedSubjectId)
       }
-      fetchAllQuestionsSummary()
+      await fetchExactSubjectCounts()
 
       setShowBulkUploadModal(false)
       setParsedQuestions([])
@@ -916,15 +1240,6 @@ export const Admin: React.FC = () => {
       .slice(0, 5)
   }, [profiles, quickGrantSearch])
 
-  // Subject question count lookup
-  const subjectQuestionCounts = useMemo(() => {
-    const counts: Record<string, number> = {}
-    allQuestionsSummary.forEach((q) => {
-      counts[q.subject_id] = (counts[q.subject_id] || 0) + 1
-    })
-    return counts
-  }, [allQuestionsSummary])
-
   // Computed exact metric counts distinguishing Total System Users, Candidates, and Staff/Admins
   const totalSystemUsers = totalProfilesCount || profiles.length
   const totalCandidatesCount = useMemo(() => {
@@ -936,6 +1251,46 @@ export const Admin: React.FC = () => {
 
   const validCount = parsedQuestions.filter((q) => q.isValid).length
   const invalidCount = parsedQuestions.filter((q) => !q.isValid).length
+
+  // Filtered support tickets for Admin Support Inbox
+  const openTicketsCount = useMemo(() => {
+    return supportTickets.filter((t) => t.status === 'open').length
+  }, [supportTickets])
+
+  const filteredSupportTickets = useMemo(() => {
+    return supportTickets.filter((t) => {
+      const matchesStatus =
+        supportStatusFilter === 'all' ? true : t.status === supportStatusFilter
+      const matchesCategory =
+        supportCategoryFilter === 'All' ? true : t.category === supportCategoryFilter
+      const q = supportSearch.toLowerCase().trim()
+      const matchesSearch =
+        q === '' ||
+        t.subject.toLowerCase().includes(q) ||
+        t.id.toLowerCase().includes(q) ||
+        (t.candidate?.full_name || '').toLowerCase().includes(q) ||
+        (t.guest_name || '').toLowerCase().includes(q) ||
+        (t.guest_email || '').toLowerCase().includes(q)
+
+      return matchesStatus && matchesCategory && matchesSearch
+    })
+  }, [supportTickets, supportStatusFilter, supportCategoryFilter, supportSearch])
+
+  const formatTicketDate = (dateString?: string) => {
+    if (!dateString) return ''
+    try {
+      const d = new Date(dateString)
+      return d.toLocaleDateString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    } catch {
+      return dateString
+    }
+  }
 
   return (
     <div className="py-6 sm:py-8 px-3 sm:px-6 max-w-7xl mx-auto space-y-6">
@@ -999,7 +1354,7 @@ export const Admin: React.FC = () => {
           </div>
           <div className="bg-white/10 backdrop-blur rounded-xl p-3 border border-white/10 text-center">
             <div className="text-xl sm:text-2xl font-bold font-mono text-indigo-300">
-              {allQuestionsSummary.length}
+              {totalQuestionsCount}
             </div>
             <div className="text-[10px] sm:text-xs text-slate-300 uppercase tracking-wider">Questions</div>
           </div>
@@ -1034,12 +1389,34 @@ export const Admin: React.FC = () => {
         >
           <span>📝</span>
           <span>Question Bank</span>
-          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">
-            {allQuestionsSummary.length}
+          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 font-mono">
+            {totalQuestionsCount}
           </span>
         </button>
 
-        {/* Tab 3: User & Role Management (Super Admin Only) */}
+        {/* Tab 3: Support Inbox (Admin & Super Admin) */}
+        <button
+          onClick={() => setActiveTab('support')}
+          className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === 'support'
+              ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
+              : 'border-transparent text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          <span>📬</span>
+          <span>Support Inbox</span>
+          <span
+            className={`text-[11px] px-1.5 py-0.5 rounded-full font-mono font-bold ${
+              openTicketsCount > 0
+                ? 'bg-amber-100 text-amber-800'
+                : 'bg-gray-100 text-gray-600'
+            }`}
+          >
+            {openTicketsCount}
+          </span>
+        </button>
+
+        {/* Tab 4: User & Role Management (Super Admin Only) */}
         <button
           onClick={() => setActiveTab('users')}
           className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
@@ -1158,6 +1535,12 @@ export const Admin: React.FC = () => {
                   Standard JAMB exam requires at least 40 questions per subject bank.
                 </p>
               </div>
+              {loadingSubjectCounts && (
+                <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-medium">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+                  <span>Syncing counts...</span>
+                </div>
+              )}
             </div>
 
             <div className="overflow-x-auto">
@@ -1556,7 +1939,399 @@ export const Admin: React.FC = () => {
       )}
 
       {/* ======================================================================= */}
-      {/* SECTION 3: USER & ROLE MANAGEMENT (Super Admin Only)                    */}
+      {/* SECTION 3: SUPPORT INBOX & CANDIDATE INQUIRIES (Admin & Super Admin)    */}
+      {/* ======================================================================= */}
+      {activeTab === 'support' && (
+        <div className="space-y-6">
+          {/* Header & Filter Controls Bar */}
+          <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg sm:text-xl font-bold text-gray-900 flex items-center gap-2">
+                  <span>📬</span>
+                  <span>Candidate Support Inbox & Inquiries</span>
+                </h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Direct communication channels with candidates. Review inquiries, syllabus disputes, and technical support requests.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={fetchSupportTickets}
+                  disabled={loadingSupportTickets}
+                  className="px-3.5 py-2 border border-gray-300 rounded-xl text-xs font-semibold text-gray-700 hover:bg-gray-50 flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <span className={loadingSupportTickets ? 'animate-spin' : ''}>↻</span>
+                  <span>Refresh Inbox</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Filter Controls Row */}
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-2 border-t border-gray-100 items-center">
+              {/* Search */}
+              <div className="sm:col-span-6">
+                <input
+                  type="text"
+                  value={supportSearch}
+                  onChange={(e) => setSupportSearch(e.target.value)}
+                  placeholder="Search by candidate name, guest email, subject, or ticket ID..."
+                  className="w-full px-3.5 py-2 text-xs sm:text-sm border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              {/* Status Filter */}
+              <div className="sm:col-span-3">
+                <select
+                  value={supportStatusFilter}
+                  onChange={(e) => setSupportStatusFilter(e.target.value as 'all' | 'open' | 'resolved')}
+                  className="w-full px-3 py-2 text-xs sm:text-sm border border-gray-300 rounded-xl bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                >
+                  <option value="open">Status: Open Only ({openTicketsCount})</option>
+                  <option value="all">Status: All Tickets ({supportTickets.length})</option>
+                  <option value="resolved">Status: Resolved Only</option>
+                </select>
+              </div>
+
+              {/* Category Filter */}
+              <div className="sm:col-span-3">
+                <select
+                  value={supportCategoryFilter}
+                  onChange={(e) => setSupportCategoryFilter(e.target.value)}
+                  className="w-full px-3 py-2 text-xs sm:text-sm border border-gray-300 rounded-xl bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                >
+                  <option value="All">All Categories</option>
+                  <option value="Technical">Technical</option>
+                  <option value="Question Bank Feedback">Question Bank Feedback</option>
+                  <option value="Exam Inquiry">Exam Inquiry</option>
+                  <option value="Payment">Payment</option>
+                  <option value="Candidate Support">Candidate Support</option>
+                  <option value="General">General</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Notification Message */}
+          {supportActionMsg && (
+            <div
+              className={`p-3.5 rounded-xl border text-xs font-medium flex items-center justify-between ${
+                supportActionMsg.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-red-50 border-red-200 text-red-800'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span>{supportActionMsg.type === 'success' ? '✓' : '⚠️'}</span>
+                <span>{supportActionMsg.text}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSupportActionMsg(null)}
+                className="text-gray-500 hover:text-gray-700 font-bold ml-2 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* Main Tickets Interface: Split Pane */}
+          {loadingSupportTickets ? (
+            <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 shadow-2xs">
+              <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+              <p className="mt-3 text-xs text-gray-500">Loading support inbox tickets...</p>
+            </div>
+          ) : filteredSupportTickets.length === 0 ? (
+            <div className="bg-white p-12 text-center rounded-2xl border border-dashed border-gray-300 shadow-2xs space-y-3">
+              <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 text-2xl flex items-center justify-center mx-auto border border-emerald-100">
+                📫
+              </div>
+              <h3 className="text-base font-bold text-gray-900">No Support Tickets Match Your Filters</h3>
+              <p className="text-xs sm:text-sm text-gray-500 max-w-md mx-auto">
+                {supportTickets.length === 0
+                  ? 'No support inquiries have been submitted yet. Candidate questions submitted via the contact form or dashboard will appear here.'
+                  : 'Try clearing your search query or selecting a different status/category filter.'}
+              </p>
+              {(supportSearch || supportStatusFilter !== 'all' || supportCategoryFilter !== 'All') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSupportSearch('')
+                    setSupportStatusFilter('all')
+                    setSupportCategoryFilter('All')
+                  }}
+                  className="mt-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 cursor-pointer"
+                >
+                  Reset Filters
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* Left Column: Master Ticket List (5 cols) */}
+              <div className="lg:col-span-5 bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden flex flex-col">
+                <div className="p-3.5 border-b border-gray-100 bg-gray-50/70 flex items-center justify-between">
+                  <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                    Tickets ({filteredSupportTickets.length})
+                  </span>
+                  <span className="text-[11px] text-gray-500 font-medium">
+                    {openTicketsCount} Active Open
+                  </span>
+                </div>
+
+                <div className="divide-y divide-gray-100 max-h-[620px] overflow-y-auto">
+                  {filteredSupportTickets.map((t) => {
+                    const isSelected = selectedAdminTicket?.id === t.id
+                    const isOpen = t.status === 'open'
+                    const candidateName =
+                      t.candidate?.full_name || t.guest_name || 'Anonymous User'
+
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => handleSelectAdminTicket(t)}
+                        className={`w-full text-left p-4 transition-colors flex flex-col gap-1.5 cursor-pointer ${
+                          isSelected
+                            ? 'bg-emerald-50/70 border-l-4 border-emerald-600'
+                            : 'hover:bg-gray-50'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200 truncate max-w-[140px]">
+                            {t.category}
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider shrink-0 ${
+                              isOpen
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                : 'bg-gray-100 text-gray-600 border-gray-200'
+                            }`}
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'
+                              }`}
+                            ></span>
+                            {isOpen ? 'Open' : 'Resolved'}
+                          </span>
+                        </div>
+
+                        <h4 className="text-xs sm:text-sm font-bold text-gray-900 line-clamp-1">
+                          {t.subject}
+                        </h4>
+
+                        <div className="flex items-center justify-between text-[11px] text-gray-500 mt-0.5">
+                          <span className="font-medium text-gray-700 truncate max-w-[160px]">
+                            👤 {candidateName}
+                          </span>
+                          {t.candidate?.track && (
+                            <span className="px-1.5 py-0.2 rounded text-[10px] bg-blue-50 text-blue-700 font-semibold border border-blue-200">
+                              {t.candidate.track}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between text-[10px] text-gray-400 mt-1 pt-1 border-t border-gray-100/60 font-mono">
+                          <span>Ref: JMB-{t.id.slice(0, 8).toUpperCase()}</span>
+                          <span>{formatTicketDate(t.created_at)}</span>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Right Column: Ticket Detail & Conversation Thread (7 cols) */}
+              <div className="lg:col-span-7 bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden flex flex-col">
+                {selectedAdminTicket ? (
+                  <>
+                    {/* Ticket Header & Status Toggle */}
+                    <div className="p-4 sm:p-5 border-b border-gray-100 bg-gray-50/50">
+                      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-white text-gray-700 border border-gray-200">
+                            {selectedAdminTicket.category}
+                          </span>
+                          <span className="text-[11px] font-mono text-gray-400">
+                            Ref: JMB-{selectedAdminTicket.id.slice(0, 8).toUpperCase()}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold border uppercase tracking-wider ${
+                              selectedAdminTicket.status === 'open'
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                : 'bg-gray-100 text-gray-600 border-gray-200'
+                            }`}
+                          >
+                            <span
+                              className={`w-2 h-2 rounded-full ${
+                                selectedAdminTicket.status === 'open'
+                                  ? 'bg-emerald-500 animate-pulse'
+                                  : 'bg-gray-400'
+                              }`}
+                            ></span>
+                            {selectedAdminTicket.status === 'open' ? 'Open' : 'Resolved'}
+                          </span>
+
+                          <button
+                            type="button"
+                            onClick={handleToggleTicketStatus}
+                            disabled={updatingTicketStatus}
+                            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all shadow-2xs cursor-pointer flex items-center gap-1.5 ${
+                              selectedAdminTicket.status === 'open'
+                                ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                                : 'bg-slate-700 hover:bg-slate-800 text-white'
+                            } disabled:opacity-50`}
+                          >
+                            {updatingTicketStatus ? (
+                              <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                            ) : selectedAdminTicket.status === 'open' ? (
+                              <span>✓ Mark as Resolved</span>
+                            ) : (
+                              <span>↺ Reopen Ticket</span>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      <h3 className="text-base sm:text-lg font-extrabold text-gray-900">
+                        {selectedAdminTicket.subject}
+                      </h3>
+
+                      {/* Candidate Meta Box */}
+                      <div className="mt-3 p-3 rounded-xl bg-white border border-gray-200 text-xs grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <div>
+                          <div className="text-[10px] uppercase font-bold text-gray-400">Sender / Candidate</div>
+                          <div className="font-semibold text-gray-900 truncate">
+                            {selectedAdminTicket.candidate?.full_name || selectedAdminTicket.guest_name || 'Guest'}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase font-bold text-gray-400">Email Address</div>
+                          <div className="font-semibold text-gray-700 truncate">
+                            {selectedAdminTicket.guest_email || (selectedAdminTicket.user_id ? 'Authenticated Account' : 'None')}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase font-bold text-gray-400">Track</div>
+                          <div className="font-semibold text-gray-900">
+                            {selectedAdminTicket.candidate?.track || 'N/A'}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase font-bold text-gray-400">Role / Status</div>
+                          <div className="font-semibold capitalize text-emerald-700">
+                            {selectedAdminTicket.candidate?.role || (selectedAdminTicket.user_id ? 'student' : 'Guest')}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Messages Scroll Area */}
+                    <div className="p-4 sm:p-5 space-y-3.5 max-h-[380px] overflow-y-auto bg-slate-50/40">
+                      {loadingAdminMessages ? (
+                        <div className="py-8 text-center text-xs text-gray-400">
+                          Loading conversation messages...
+                        </div>
+                      ) : adminTicketMessages.length === 0 ? (
+                        <div className="py-8 text-center text-xs text-gray-400">
+                          No messages recorded on this ticket yet.
+                        </div>
+                      ) : (
+                        adminTicketMessages.map((msg) => {
+                          const isStaff =
+                            msg.sender_id === currentUser?.id ||
+                            (msg.sender_name && (msg.sender_name.includes('🛡️') || msg.sender_name.includes('Admin') || msg.sender_name.includes('Moderator')))
+
+                          return (
+                            <div
+                              key={msg.id}
+                              className={`flex flex-col ${
+                                isStaff ? 'items-end' : 'items-start'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2 mb-1 text-[11px] text-gray-400">
+                                <span className={`font-semibold ${isStaff ? 'text-emerald-700' : 'text-gray-700'}`}>
+                                  {isStaff
+                                    ? msg.sender_name || '🛡️ Staff Member'
+                                    : msg.sender_name || selectedAdminTicket.candidate?.full_name || selectedAdminTicket.guest_name || 'Candidate'}
+                                </span>
+                                <span>•</span>
+                                <span>{formatTicketDate(msg.created_at)}</span>
+                              </div>
+                              <div
+                                className={`p-3.5 rounded-2xl text-xs sm:text-sm leading-relaxed max-w-[85%] sm:max-w-[78%] whitespace-pre-wrap ${
+                                  isStaff
+                                    ? 'bg-emerald-600 text-white rounded-br-xs shadow-xs'
+                                    : 'bg-white text-gray-900 border border-gray-200 rounded-bl-xs shadow-2xs'
+                                }`}
+                              >
+                                {msg.message}
+                              </div>
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+
+                    {/* Admin Reply Composer */}
+                    <div className="p-4 border-t border-gray-100 bg-white space-y-2">
+                      <label htmlFor="admin-reply-input" className="sr-only">
+                        Post staff response or academic explanation
+                      </label>
+                      <textarea
+                        id="admin-reply-input"
+                        rows={3}
+                        value={adminReplyText}
+                        onChange={(e) => setAdminReplyText(e.target.value)}
+                        placeholder="Type official staff response or resolution notes to candidate..."
+                        className="w-full px-3.5 py-2.5 text-xs sm:text-sm border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 resize-none"
+                      />
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <span className="text-[11px] text-gray-400">
+                          Responses are delivered directly to the candidate's dashboard.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleSendAdminReply}
+                          disabled={sendingAdminReply || !adminReplyText.trim()}
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                          {sendingAdminReply ? (
+                            <>
+                              <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                              <span>Sending Reply...</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>Send Official Reply</span>
+                              <span>→</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="p-12 text-center text-gray-400 space-y-2">
+                    <span className="text-3xl">👈</span>
+                    <p className="text-xs">Select a support ticket from the list on the left to inspect the conversation and send replies.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* SECTION 4: USER & ROLE MANAGEMENT (Super Admin Only)                    */}
       {/* ======================================================================= */}
       {activeTab === 'users' && (
         <div className="space-y-4">

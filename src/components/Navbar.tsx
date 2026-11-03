@@ -133,6 +133,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         ]
       : []),
     ...(hasAdminAccess ? [{ name: "Admin Portal", path: "/admin" }] : []),
+    { name: "Contact", path: "/contact" },
   ];
 
   return (
@@ -297,6 +298,25 @@ export const Navbar: React.FC<NavbarProps> = ({
                 Candidate Sign In
               </Link>
             )}
+          </div>
+
+          {/* Quick Legal & AdSense Compliance Links (Mobile) */}
+          <div className="pt-3 border-t border-slate-100 flex items-center justify-center gap-3 text-xs text-slate-500">
+            <Link
+              to="/privacy"
+              onClick={() => setMobileMenuOpen(false)}
+              className="hover:text-emerald-600 transition-colors"
+            >
+              Privacy Policy
+            </Link>
+            <span>•</span>
+            <Link
+              to="/terms"
+              onClick={() => setMobileMenuOpen(false)}
+              className="hover:text-emerald-600 transition-colors"
+            >
+              Terms of Service
+            </Link>
           </div>
         </div>
       )}
