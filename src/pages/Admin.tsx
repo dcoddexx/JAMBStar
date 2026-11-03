@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 
-interface Profile {
+export interface Profile {
   id: string
   full_name: string | null
   avatar_url: string | null
@@ -10,14 +10,16 @@ interface Profile {
   created_at: string
 }
 
-interface Subject {
+export interface Subject {
   id: string
   name: string
   code: string
   icon?: string | null
+  description?: string | null
+  is_compulsory?: boolean
 }
 
-interface Question {
+export interface Question {
   id: string
   subject_id: string
   question_text: string
@@ -32,7 +34,14 @@ interface Question {
   created_at: string
 }
 
-interface ParsedCSVQuestion {
+export interface CBTSettings {
+  examDuration: number // in minutes
+  passingThreshold: number // in %
+  questionsPerSubject: number
+  lastUpdated?: string
+}
+
+export interface ParsedCSVQuestion {
   rowNumber: number
   rawSubject: string
   subjectId: string | null
@@ -49,8 +58,18 @@ interface ParsedCSVQuestion {
   validationError?: string
 }
 
+type AdminTab = 'analytics' | 'questions' | 'users' | 'settings'
+
 export const Admin: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'users' | 'questions'>('users')
+  // Navigation & Authentication
+  const [activeTab, setActiveTab] = useState<AdminTab>('analytics')
+  const [currentUser, setCurrentUser] = useState<{
+    id: string
+    email?: string
+    full_name?: string | null
+    role: 'student' | 'admin' | 'super_admin'
+  } | null>(null)
+  const [loadingUser, setLoadingUser] = useState<boolean>(true)
 
   // User Management State
   const [profiles, setProfiles] = useState<Profile[]>([])
@@ -58,15 +77,28 @@ export const Admin: React.FC = () => {
   const [userSearch, setUserSearch] = useState<string>('')
   const [trackFilter, setTrackFilter] = useState<string>('All')
   const [roleFilter, setRoleFilter] = useState<string>('All')
+  const [quickGrantSearch, setQuickGrantSearch] = useState<string>('')
   const [profileActionMsg, setProfileActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [userToDelete, setUserToDelete] = useState<Profile | null>(null)
+  const [deletingUser, setDeletingUser] = useState<boolean>(false)
 
   // Question Bank State
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>('')
   const [questions, setQuestions] = useState<Question[]>([])
+  const [allQuestionsSummary, setAllQuestionsSummary] = useState<{ id: string; subject_id: string; exam_year: number | null }[]>([])
   const [loadingQuestions, setLoadingQuestions] = useState<boolean>(false)
+  const [questionSearch, setQuestionSearch] = useState<string>('')
+  const [examYearFilter, setExamYearFilter] = useState<string>('All')
+  const [currentPage, setCurrentPage] = useState<number>(1)
+  const questionsPerPage = 15
   const [showAddQuestionModal, setShowAddQuestionModal] = useState<boolean>(false)
   const [questionActionMsg, setQuestionActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  // Bulk Wipe for Subject (Super Admin Only)
+  const [showBulkWipeModal, setShowBulkWipeModal] = useState<boolean>(false)
+  const [wipeConfirmationInput, setWipeConfirmationInput] = useState<string>('')
+  const [wipingSubject, setWipingSubject] = useState<boolean>(false)
 
   // Single Question Form Fields (Add & Edit)
   const [editingQuestionId, setEditingQuestionId] = useState<string | null>(null)
@@ -89,6 +121,68 @@ export const Admin: React.FC = () => {
   const [parsingCsv, setParsingCsv] = useState<boolean>(false)
   const [uploadingCsv, setUploadingCsv] = useState<boolean>(false)
   const [bulkError, setBulkError] = useState<string | null>(null)
+
+  // Global CBT Settings State (Super Admin Only)
+  const [cbtSettings, setCbtSettings] = useState<CBTSettings>(() => {
+    try {
+      const stored = localStorage.getItem('jambstar_cbt_settings')
+      if (stored) {
+        const parsed = JSON.parse(stored)
+        return {
+          examDuration: typeof parsed.examDuration === 'number' ? parsed.examDuration : 120,
+          passingThreshold: typeof parsed.passingThreshold === 'number' ? parsed.passingThreshold : 50,
+          questionsPerSubject: typeof parsed.questionsPerSubject === 'number' ? parsed.questionsPerSubject : 40,
+          lastUpdated: parsed.lastUpdated,
+        }
+      }
+    } catch {
+      // fallback
+    }
+    return {
+      examDuration: 120,
+      passingThreshold: 50,
+      questionsPerSubject: 40,
+    }
+  })
+  const [settingsSavedMsg, setSettingsSavedMsg] = useState<string | null>(null)
+
+  // Role Checks
+  const userRole = currentUser?.role || null
+  const isSuperAdmin = userRole === 'super_admin'
+  const isAdmin = userRole === 'admin' || isSuperAdmin
+
+  // ---------------------------------------------------------------------------
+  // Data Fetching
+  // ---------------------------------------------------------------------------
+
+  // Fetch current user details & role from Supabase
+  const fetchCurrentUser = async () => {
+    setLoadingUser(true)
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', user.id)
+          .maybeSingle()
+
+        const role = (profile?.role as 'student' | 'admin' | 'super_admin') || 'admin'
+        setCurrentUser({
+          id: user.id,
+          email: user.email,
+          full_name: profile?.full_name || null,
+          role,
+        })
+      }
+    } catch (err) {
+      console.error('Error fetching current user:', err)
+    } finally {
+      setLoadingUser(false)
+    }
+  }
 
   // Load Profiles
   const fetchProfiles = async () => {
@@ -114,7 +208,7 @@ export const Admin: React.FC = () => {
     try {
       const { data, error } = await supabase
         .from('subjects')
-        .select('id, name, code, icon')
+        .select('id, name, code, icon, is_compulsory, description')
         .order('name', { ascending: true })
 
       if (error) throw error
@@ -129,7 +223,21 @@ export const Admin: React.FC = () => {
     }
   }
 
-  // Load Questions for Selected Subject
+  // Load Question Counts & Summaries Across All Subjects
+  const fetchAllQuestionsSummary = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('questions')
+        .select('id, subject_id, exam_year')
+
+      if (error) throw error
+      setAllQuestionsSummary(data || [])
+    } catch (err) {
+      console.error('Error fetching questions summary:', err)
+    }
+  }
+
+  // Load Detailed Questions for Selected Subject
   const fetchQuestions = async (subjectId: string) => {
     if (!subjectId) return
     setLoadingQuestions(true)
@@ -151,18 +259,36 @@ export const Admin: React.FC = () => {
   }
 
   useEffect(() => {
+    fetchCurrentUser()
     fetchProfiles()
     fetchSubjects()
+    fetchAllQuestionsSummary()
   }, [])
 
   useEffect(() => {
     if (selectedSubjectId) {
       fetchQuestions(selectedSubjectId)
+      setCurrentPage(1)
     }
   }, [selectedSubjectId])
 
-  // Change User Role
-  const handleUpdateRole = async (userId: string, newRole: 'student' | 'admin') => {
+  // ---------------------------------------------------------------------------
+  // Super Admin: User Role Switcher & Account Management
+  // ---------------------------------------------------------------------------
+
+  // Update user role in profiles table
+  const handleUpdateRole = async (userId: string, newRole: 'student' | 'admin' | 'super_admin') => {
+    if (!isSuperAdmin) {
+      setProfileActionMsg({ type: 'error', text: 'Unauthorized: Only Super Admins can modify user roles.' })
+      return
+    }
+
+    // Safeguard: Prevent self-demotion
+    if (userId === currentUser?.id) {
+      setProfileActionMsg({ type: 'error', text: 'Safeguard active: You cannot modify or demote your own Super Admin account.' })
+      return
+    }
+
     setProfileActionMsg(null)
     try {
       const { error } = await supabase
@@ -175,14 +301,100 @@ export const Admin: React.FC = () => {
       setProfiles((prev) =>
         prev.map((p) => (p.id === userId ? { ...p, role: newRole } : p))
       )
-      setProfileActionMsg({ type: 'success', text: `User role successfully updated to ${newRole}.` })
+      setProfileActionMsg({ type: 'success', text: `User role successfully updated to "${newRole}".` })
     } catch (err: unknown) {
       const e = err as Error
       setProfileActionMsg({ type: 'error', text: `Failed to update role: ${e.message}` })
     }
   }
 
-  // Open modal for Adding a new question
+  // Delete Candidate Account
+  const handleConfirmDeleteUser = async () => {
+    if (!userToDelete || !isSuperAdmin) return
+
+    // Safeguard: Prevent self-deletion
+    if (userToDelete.id === currentUser?.id) {
+      setProfileActionMsg({ type: 'error', text: 'Safeguard active: You cannot delete your own active account.' })
+      setUserToDelete(null)
+      return
+    }
+
+    setDeletingUser(true)
+    setProfileActionMsg(null)
+
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', userToDelete.id)
+
+      if (error) throw error
+
+      setProfiles((prev) => prev.filter((p) => p.id !== userToDelete.id))
+      setProfileActionMsg({
+        type: 'success',
+        text: `Account for "${userToDelete.full_name || userToDelete.id}" has been deleted.`,
+      })
+      setUserToDelete(null)
+    } catch (err: unknown) {
+      const e = err as Error
+      setProfileActionMsg({ type: 'error', text: `Failed to delete account: ${e.message}` })
+    } finally {
+      setDeletingUser(false)
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Super Admin: Bulk Wipe Question Bank for Subject
+  // ---------------------------------------------------------------------------
+  const activeSubject = subjects.find((s) => s.id === selectedSubjectId)
+
+  const handleBulkWipeSubjectQuestions = async () => {
+    if (!isSuperAdmin) {
+      setQuestionActionMsg({ type: 'error', text: 'Unauthorized: Only Super Admins can perform bulk wipe.' })
+      return
+    }
+
+    if (!activeSubject) return
+    if (wipeConfirmationInput.trim().toLowerCase() !== activeSubject.name.toLowerCase()) {
+      setQuestionActionMsg({
+        type: 'error',
+        text: `Confirmation mismatch. You must type "${activeSubject.name}" exactly to confirm wipe.`,
+      })
+      return
+    }
+
+    setWipingSubject(true)
+    setQuestionActionMsg(null)
+
+    try {
+      const { error } = await supabase
+        .from('questions')
+        .delete()
+        .eq('subject_id', selectedSubjectId)
+
+      if (error) throw error
+
+      setQuestions([])
+      fetchAllQuestionsSummary()
+      setShowBulkWipeModal(false)
+      setWipeConfirmationInput('')
+      setQuestionActionMsg({
+        type: 'success',
+        text: `All questions for "${activeSubject.name}" have been permanently wiped.`,
+      })
+    } catch (err: unknown) {
+      const e = err as Error
+      setQuestionActionMsg({ type: 'error', text: `Failed to wipe questions: ${e.message}` })
+    } finally {
+      setWipingSubject(false)
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Single Question Management (Add, Edit, Delete)
+  // ---------------------------------------------------------------------------
+
   const handleOpenAddQuestionModal = () => {
     setEditingQuestionId(null)
     setNewQuestionText('')
@@ -199,7 +411,6 @@ export const Admin: React.FC = () => {
     setShowAddQuestionModal(true)
   }
 
-  // Open modal for Editing an existing question
   const handleOpenEditQuestionModal = (q: Question) => {
     setEditingQuestionId(q.id)
     setNewSubjectId(q.subject_id)
@@ -215,7 +426,6 @@ export const Admin: React.FC = () => {
     setShowAddQuestionModal(true)
   }
 
-  // Submit Single Question (Create or Update)
   const handleSaveQuestion = async (e: React.FormEvent) => {
     e.preventDefault()
     setQuestionActionMsg(null)
@@ -268,7 +478,7 @@ export const Admin: React.FC = () => {
         if (data && data.subject_id === selectedSubjectId) {
           setQuestions((prev) => [data as Question, ...prev])
         }
-
+        fetchAllQuestionsSummary()
         setQuestionActionMsg({ type: 'success', text: 'New question successfully added to question bank!' })
       }
 
@@ -290,9 +500,8 @@ export const Admin: React.FC = () => {
     }
   }
 
-  // Delete Question
   const handleDeleteQuestion = async (questionId: string) => {
-    if (!window.confirm('Are you sure you want to delete this question?')) return
+    if (!window.confirm('Are you sure you want to delete this question? This cannot be undone.')) return
     setQuestionActionMsg(null)
     try {
       const { error } = await supabase
@@ -303,11 +512,66 @@ export const Admin: React.FC = () => {
       if (error) throw error
 
       setQuestions((prev) => prev.filter((q) => q.id !== questionId))
+      fetchAllQuestionsSummary()
       setQuestionActionMsg({ type: 'success', text: 'Question deleted successfully.' })
     } catch (err: unknown) {
       const e = err as Error
       setQuestionActionMsg({ type: 'error', text: `Failed to delete question: ${e.message}` })
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // CSV Export Engine (9 Columns)
+  // ---------------------------------------------------------------------------
+  const handleExportCSV = () => {
+    const subjName = activeSubject?.name || 'Subject'
+
+    const headers = [
+      'Subject',
+      'Question Text',
+      'Option A',
+      'Option B',
+      'Option C',
+      'Option D',
+      'Correct Option',
+      'Explanation',
+      'Image URL',
+    ]
+
+    const escapeCSV = (val: string | number | null | undefined): string => {
+      if (val === null || val === undefined) return ''
+      const str = String(val)
+      if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+        return `"${str.replace(/"/g, '""')}"`
+      }
+      return str
+    }
+
+    const rows = questions.map((q) => [
+      escapeCSV(subjName),
+      escapeCSV(q.question_text),
+      escapeCSV(q.option_a),
+      escapeCSV(q.option_b),
+      escapeCSV(q.option_c),
+      escapeCSV(q.option_d),
+      escapeCSV(q.correct_option),
+      escapeCSV(q.explanation || ''),
+      escapeCSV(q.image_url || ''),
+    ])
+
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\r\n')
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute(
+      'download',
+      `${subjName.toLowerCase().replace(/[^a-z0-9]/g, '_')}_questions.csv`
+    )
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
   }
 
   // ---------------------------------------------------------------------------
@@ -399,103 +663,66 @@ export const Admin: React.FC = () => {
         const headerRow = rawRows[0]
         if (headerRow.length !== 9) {
           setBulkError(
-            `Invalid CSV format: Expected exactly 9 columns, but found ${headerRow.length}. The 9 required columns are: Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Image URL.`
+            `Expected exactly 9 columns in CSV header, but found ${headerRow.length}. Ensure headers are: Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Image URL.`
           )
           setParsedQuestions([])
           setParsingCsv(false)
           return
         }
-
-        const ninthHeader = headerRow[8].trim()
-        const ninthHeaderClean = ninthHeader.toLowerCase().replace(/[^a-z0-9]/g, '')
-        if (ninthHeaderClean !== 'imageurl' && ninthHeaderClean !== 'image') {
-          setBulkError(
-            `Invalid 9th column header: Expected 'Image URL', but found '${ninthHeader}'.`
-          )
-          setParsedQuestions([])
-          setParsingCsv(false)
-          return
-        }
-
-        // Map column indices based on header row
-        const header = headerRow.map((h) => h.toLowerCase().replace(/[^a-z0-9]/g, ''))
-
-        let subjIdx = header.findIndex((h) => h.includes('subj') || h.includes('course'))
-        let qTextIdx = header.findIndex((h) => h.includes('quest') || h.includes('prompt'))
-        let optAIdx = header.findIndex((h) => h === 'optiona' || h === 'opta' || h === 'a')
-        let optBIdx = header.findIndex((h) => h === 'optionb' || h === 'optb' || h === 'b')
-        let optCIdx = header.findIndex((h) => h === 'optionc' || h === 'optc' || h === 'c')
-        let optDIdx = header.findIndex((h) => h === 'optiond' || h === 'optd' || h === 'd')
-        let corrIdx = header.findIndex((h) => h.includes('correct') || h.includes('ans'))
-        let expIdx = header.findIndex((h) => h.includes('expl') || h.includes('solut'))
-        let imgIdx = header.findIndex((h) => h.includes('image') || h.includes('diagram') || h.includes('pic'))
-
-        // Fallback default index positions if headers are standard:
-        if (subjIdx === -1) subjIdx = 0
-        if (qTextIdx === -1) qTextIdx = 1
-        if (optAIdx === -1) optAIdx = 2
-        if (optBIdx === -1) optBIdx = 3
-        if (optCIdx === -1) optCIdx = 4
-        if (optDIdx === -1) optDIdx = 5
-        if (corrIdx === -1) corrIdx = 6
-        if (expIdx === -1) expIdx = 7
-        if (imgIdx === -1) imgIdx = 8
 
         const parsed: ParsedCSVQuestion[] = []
 
-        // Process data rows (skip header)
         for (let i = 1; i < rawRows.length; i++) {
-          const row = rawRows[i]
-          if (row.length === 0 || (row.length === 1 && !row[0].trim())) continue
+          const r = rawRows[i]
+          if (r.length === 0 || r.every((c) => c.trim() === '')) continue
+
+          const rowNum = i + 1
+          const rawSubject = r[0] || ''
+          const questionText = r[1] || ''
+          const optionA = r[2] || ''
+          const optionB = r[3] || ''
+          const optionC = r[4] || ''
+          const optionD = r[5] || ''
+          const rawCorrect = (r[6] || '').toUpperCase().trim()
+          const explanation = r[7] || ''
+          const rawImageUrl = r[8] || ''
+          const imageUrl = rawImageUrl.trim() === '' ? null : rawImageUrl.trim()
+
+          const matchedSub = findSubjectMatch(rawSubject)
 
           let isValid = true
           let validationError = ''
 
-          if (row.length !== 9) {
+          if (!matchedSub) {
             isValid = false
-            validationError = `Expected exactly 9 columns, but row has ${row.length}.`
-          }
-
-          const rawSubject = row[subjIdx] || ''
-          const questionText = row[qTextIdx] || ''
-          const optionA = row[optAIdx] || ''
-          const optionB = row[optBIdx] || ''
-          const optionC = row[optCIdx] || ''
-          const optionD = row[optDIdx] || ''
-          const rawCorrect = (row[corrIdx] || '').toUpperCase().trim()
-          const explanation = row[expIdx] || ''
-          const rawImageUrl = row[imgIdx] ? row[imgIdx].trim() : ''
-          const imageUrl = rawImageUrl !== '' ? rawImageUrl : null
-
-          const matchedSubject = findSubjectMatch(rawSubject)
-
-          if (isValid) {
-            if (!matchedSubject) {
-              isValid = false
-              validationError = `Unknown Subject "${rawSubject}". Could not map to subjects table.`
-            } else if (!questionText.trim()) {
-              isValid = false
-              validationError = 'Question text is empty.'
-            } else if (!optionA.trim() || !optionB.trim() || !optionC.trim() || !optionD.trim()) {
-              isValid = false
-              validationError = 'Options A, B, C, and D must all be non-empty.'
-            } else if (!['A', 'B', 'C', 'D'].includes(rawCorrect)) {
-              isValid = false
-              validationError = `Invalid correct option "${rawCorrect}". Must be A, B, C, or D.`
-            }
+            validationError = `Subject "${rawSubject}" could not be mapped to any registered subject.`
+          } else if (!questionText.trim()) {
+            isValid = false
+            validationError = 'Question text cannot be blank.'
+          } else if (!optionA.trim() || !optionB.trim() || !optionC.trim() || !optionD.trim()) {
+            isValid = false
+            validationError = 'All 4 options (A, B, C, D) are required.'
+          } else if (!['A', 'B', 'C', 'D'].includes(rawCorrect)) {
+            isValid = false
+            validationError = `Invalid correct option "${rawCorrect}". Must be A, B, C, or D.`
           }
 
           parsed.push({
-            rowNumber: i + 1,
+            rowNumber: rowNum,
             rawSubject,
-            subjectId: matchedSubject?.id || null,
-            subjectName: matchedSubject?.name || 'Unmapped',
+            subjectId: matchedSub ? matchedSub.id : null,
+            subjectName: matchedSub ? matchedSub.name : 'Unknown Subject',
             questionText,
             optionA,
             optionB,
             optionC,
             optionD,
-            correctOption: (['A', 'B', 'C', 'D'].includes(rawCorrect) ? rawCorrect : '') as 'A' | 'B' | 'C' | 'D' | '',
+            correctOption: (['A', 'B', 'C', 'D'].includes(rawCorrect) ? rawCorrect : '') as
+              | 'A'
+              | 'B'
+              | 'C'
+              | 'D'
+              | '',
             explanation,
             imageUrl,
             isValid,
@@ -514,7 +741,6 @@ export const Admin: React.FC = () => {
     reader.readAsText(file)
   }
 
-  // Batch insert valid questions into Supabase
   const handleBatchInsertQuestions = async () => {
     const validQuestions = parsedQuestions.filter((q) => q.isValid && q.subjectId)
     if (validQuestions.length === 0) {
@@ -547,12 +773,11 @@ export const Admin: React.FC = () => {
         text: `Batch upload successful! Added ${rowsToInsert.length} questions to the database.`,
       })
 
-      // Refresh current question bank view
       if (selectedSubjectId) {
         fetchQuestions(selectedSubjectId)
       }
+      fetchAllQuestionsSummary()
 
-      // Reset modal state
       setShowBulkUploadModal(false)
       setParsedQuestions([])
       setCsvFileName('')
@@ -564,7 +789,6 @@ export const Admin: React.FC = () => {
     }
   }
 
-  // Generate & Download sample CSV template
   const handleDownloadTemplate = () => {
     const sample =
       'Subject,Question Text,Option A,Option B,Option C,Option D,Correct Option,Explanation,Image URL\n' +
@@ -581,39 +805,159 @@ export const Admin: React.FC = () => {
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+    URL.revokeObjectURL(url)
   }
 
-  // Filtered Profiles for User Management
-  const filteredProfiles = profiles.filter((p) => {
-    const matchesSearch =
-      (p.full_name || '').toLowerCase().includes(userSearch.toLowerCase()) ||
-      p.id.toLowerCase().includes(userSearch.toLowerCase())
-    const matchesTrack = trackFilter === 'All' || p.track === trackFilter
-    const matchesRole = roleFilter === 'All' || p.role === roleFilter
-    return matchesSearch && matchesTrack && matchesRole
-  })
+  // ---------------------------------------------------------------------------
+  // Super Admin: Global CBT Settings Save / Reset
+  // ---------------------------------------------------------------------------
+  const handleSaveSettings = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!isSuperAdmin) return
+
+    const updated: CBTSettings = {
+      ...cbtSettings,
+      lastUpdated: new Date().toISOString(),
+    }
+    localStorage.setItem('jambstar_cbt_settings', JSON.stringify(updated))
+    setCbtSettings(updated)
+    setSettingsSavedMsg('Global CBT exam configuration saved successfully! Quiz timers and rules are updated.')
+    setTimeout(() => setSettingsSavedMsg(null), 4500)
+  }
+
+  const handleResetSettings = () => {
+    if (!isSuperAdmin) return
+    const defaults: CBTSettings = {
+      examDuration: 120,
+      passingThreshold: 50,
+      questionsPerSubject: 40,
+      lastUpdated: new Date().toISOString(),
+    }
+    localStorage.setItem('jambstar_cbt_settings', JSON.stringify(defaults))
+    setCbtSettings(defaults)
+    setSettingsSavedMsg('Settings reset to default JAMB UTME specifications (120 mins, 50% pass mark, 40 questions/subject).')
+    setTimeout(() => setSettingsSavedMsg(null), 4500)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Filtered & Paginated Questions for Question Bank Tab
+  // ---------------------------------------------------------------------------
+  const availableYears = useMemo(() => {
+    const set = new Set<string>()
+    questions.forEach((q) => {
+      if (q.exam_year) set.add(String(q.exam_year))
+    })
+    return Array.from(set).sort((a, b) => b.localeCompare(a))
+  }, [questions])
+
+  const filteredQuestions = useMemo(() => {
+    return questions.filter((q) => {
+      const qText = q.question_text.toLowerCase()
+      const qExp = (q.explanation || '').toLowerCase()
+      const search = questionSearch.trim().toLowerCase()
+
+      const matchesSearch =
+        search === '' || qText.includes(search) || qExp.includes(search)
+
+      const matchesYear =
+        examYearFilter === 'All' ||
+        (examYearFilter === 'Unspecified' && !q.exam_year) ||
+        String(q.exam_year) === examYearFilter
+
+      return matchesSearch && matchesYear
+    })
+  }, [questions, questionSearch, examYearFilter])
+
+  const totalPages = Math.max(1, Math.ceil(filteredQuestions.length / questionsPerPage))
+  const paginatedQuestions = useMemo(() => {
+    const start = (currentPage - 1) * questionsPerPage
+    return filteredQuestions.slice(start, start + questionsPerPage)
+  }, [filteredQuestions, currentPage, questionsPerPage])
+
+  // ---------------------------------------------------------------------------
+  // Filtered Users for User Management Tab
+  // ---------------------------------------------------------------------------
+  const filteredProfiles = useMemo(() => {
+    return profiles.filter((p) => {
+      const matchesSearch =
+        (p.full_name || '').toLowerCase().includes(userSearch.toLowerCase()) ||
+        p.id.toLowerCase().includes(userSearch.toLowerCase())
+      const matchesTrack = trackFilter === 'All' || p.track === trackFilter
+      const matchesRole = roleFilter === 'All' || p.role === roleFilter
+      return matchesSearch && matchesTrack && matchesRole
+    })
+  }, [profiles, userSearch, trackFilter, roleFilter])
+
+  // Quick grant search candidates (students only)
+  const quickGrantCandidates = useMemo(() => {
+    if (!quickGrantSearch.trim()) return []
+    const term = quickGrantSearch.toLowerCase()
+    return profiles
+      .filter(
+        (p) =>
+          p.role === 'student' &&
+          ((p.full_name || '').toLowerCase().includes(term) || p.id.toLowerCase().includes(term))
+      )
+      .slice(0, 5)
+  }, [profiles, quickGrantSearch])
+
+  // Subject question count lookup
+  const subjectQuestionCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    allQuestionsSummary.forEach((q) => {
+      counts[q.subject_id] = (counts[q.subject_id] || 0) + 1
+    })
+    return counts
+  }, [allQuestionsSummary])
 
   const validCount = parsedQuestions.filter((q) => q.isValid).length
   const invalidCount = parsedQuestions.filter((q) => !q.isValid).length
 
   return (
     <div className="py-6 sm:py-8 px-3 sm:px-6 max-w-7xl mx-auto space-y-6">
-      {/* Top Banner */}
-      <div className="bg-gradient-to-r from-slate-900 to-emerald-950 rounded-2xl p-6 sm:p-8 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-6">
+      {/* ======================================================================= */}
+      {/* Top Banner with RBAC Header & Role Badge                                */}
+      {/* ======================================================================= */}
+      <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-emerald-950 rounded-2xl p-6 sm:p-8 text-white shadow-lg flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 mb-3">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            Super Admin & Moderator Console
+          <div className="flex flex-wrap items-center gap-2.5 mb-2">
+            {/* Live Role Badge */}
+            {isSuperAdmin ? (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-xs">
+                <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping"></span>
+                👑 Super Admin
+              </span>
+            ) : isAdmin ? (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-xs">
+                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                🛡️ Admin / Moderator
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-gray-500/20 text-gray-300 border border-gray-500/40 shadow-xs">
+                Student
+              </span>
+            )}
+
+            {/* Authenticated User Name/Email */}
+            <span className="text-xs text-slate-300 font-medium">
+              Signed in as{' '}
+              <strong className="text-white">
+                {currentUser?.full_name || currentUser?.email || (loadingUser ? 'Loading...' : 'Staff Member')}
+              </strong>
+            </span>
           </div>
+
           <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
             JAMBStar Administration Portal
           </h1>
-          <p className="mt-1 text-sm text-slate-300 max-w-2xl">
-            Manage student candidate records, promote moderators, and curate UTME past questions with live Row-Level Security.
+          <p className="mt-1 text-xs sm:text-sm text-slate-300 max-w-2xl leading-relaxed">
+            {isSuperAdmin
+              ? 'Full Super Admin access enabled. Manage candidate roles, configure global CBT rules, review analytics, and curate past questions.'
+              : 'Admin access active. Manage and edit UTME past question banks and view platform performance metrics.'}
           </p>
         </div>
 
-        {/* Quick Stats */}
+        {/* Top Summary Metrics */}
         <div className="grid grid-cols-3 gap-3 shrink-0">
           <div className="bg-white/10 backdrop-blur rounded-xl p-3 border border-white/10 text-center">
             <div className="text-xl sm:text-2xl font-bold font-mono text-emerald-400">{profiles.length}</div>
@@ -626,224 +970,273 @@ export const Admin: React.FC = () => {
             <div className="text-[10px] sm:text-xs text-slate-300 uppercase tracking-wider">Admins</div>
           </div>
           <div className="bg-white/10 backdrop-blur rounded-xl p-3 border border-white/10 text-center">
-            <div className="text-xl sm:text-2xl font-bold font-mono text-emerald-400">{subjects.length}</div>
-            <div className="text-[10px] sm:text-xs text-slate-300 uppercase tracking-wider">Subjects</div>
+            <div className="text-xl sm:text-2xl font-bold font-mono text-indigo-300">
+              {allQuestionsSummary.length}
+            </div>
+            <div className="text-[10px] sm:text-xs text-slate-300 uppercase tracking-wider">Questions</div>
           </div>
         </div>
       </div>
 
-      {/* Navigation Tabs */}
-      <div className="flex border-b border-gray-200">
+      {/* ======================================================================= */}
+      {/* Navigation Tabs (RBAC-Aware)                                            */}
+      {/* ======================================================================= */}
+      <div className="flex border-b border-gray-200 overflow-x-auto no-scrollbar gap-1">
+        {/* Tab 1: Dashboard Analytics */}
         <button
-          onClick={() => setActiveTab('users')}
-          className={`py-3 px-6 text-sm sm:text-base font-semibold border-b-2 transition-all cursor-pointer flex items-center gap-2 ${
-            activeTab === 'users'
+          onClick={() => setActiveTab('analytics')}
+          className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === 'analytics'
               ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
               : 'border-transparent text-gray-500 hover:text-gray-900'
           }`}
         >
-          <span>👥</span>
-          <span>User Management</span>
-          <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
-            {profiles.length}
-          </span>
+          <span>📊</span>
+          <span>Dashboard Analytics</span>
         </button>
 
+        {/* Tab 2: Question Bank Editor */}
         <button
           onClick={() => setActiveTab('questions')}
-          className={`py-3 px-6 text-sm sm:text-base font-semibold border-b-2 transition-all cursor-pointer flex items-center gap-2 ${
+          className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
             activeTab === 'questions'
               ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
               : 'border-transparent text-gray-500 hover:text-gray-900'
           }`}
         >
           <span>📝</span>
-          <span>Question Bank Editor</span>
-          <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
-            {questions.length} in view
+          <span>Question Bank</span>
+          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">
+            {allQuestionsSummary.length}
           </span>
+        </button>
+
+        {/* Tab 3: User & Role Management (Super Admin Only) */}
+        <button
+          onClick={() => setActiveTab('users')}
+          className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === 'users'
+              ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
+              : 'border-transparent text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          <span>👥</span>
+          <span>User & Role Management</span>
+          {!isSuperAdmin ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-mono">
+              🔒 Super Admin
+            </span>
+          ) : (
+            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-bold">
+              {profiles.length}
+            </span>
+          )}
+        </button>
+
+        {/* Tab 4: Global CBT Settings (Super Admin Only) */}
+        <button
+          onClick={() => setActiveTab('settings')}
+          className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === 'settings'
+              ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
+              : 'border-transparent text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          <span>⚙️</span>
+          <span>Global CBT Settings</span>
+          {!isSuperAdmin && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-mono">
+              🔒
+            </span>
+          )}
         </button>
       </div>
 
-      {/* ========================================================================= */}
-      {/* SECTION 1: USER MANAGEMENT                                                */}
-      {/* ========================================================================= */}
-      {activeTab === 'users' && (
-        <div className="space-y-4">
-          {profileActionMsg && (
-            <div
-              className={`p-4 rounded-xl text-xs sm:text-sm flex items-center justify-between border ${
-                profileActionMsg.type === 'success'
-                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                  : 'bg-red-50 text-red-800 border-red-200'
-              }`}
-            >
-              <span>{profileActionMsg.text}</span>
-              <button
-                onClick={() => setProfileActionMsg(null)}
-                className="text-gray-400 hover:text-gray-600 text-sm font-bold"
-              >
-                ✕
-              </button>
-            </div>
-          )}
-
-          {/* Search & Filters */}
-          <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row gap-3 items-center justify-between">
-            <div className="w-full sm:w-72">
-              <input
-                type="text"
-                placeholder="Search candidates by name..."
-                value={userSearch}
-                onChange={(e) => setUserSearch(e.target.value)}
-                className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-              />
+      {/* ======================================================================= */}
+      {/* SECTION 1: DASHBOARD ANALYTICS (Admin & Super Admin)                    */}
+      {/* ======================================================================= */}
+      {activeTab === 'analytics' && (
+        <div className="space-y-6">
+          {/* Analytics Stat Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
+              <div className="flex items-center justify-between text-gray-500 text-xs font-bold uppercase tracking-wider">
+                <span>Total Candidates</span>
+                <span className="text-lg">🎓</span>
+              </div>
+              <div className="text-3xl font-extrabold text-gray-900 mt-2 font-mono">
+                {profiles.length}
+              </div>
+              <div className="mt-2 text-xs text-gray-500 flex gap-2">
+                <span>Science: {profiles.filter((p) => p.track === 'Science').length}</span>
+                <span>•</span>
+                <span>Arts: {profiles.filter((p) => p.track === 'Arts').length}</span>
+                <span>•</span>
+                <span>Comm: {profiles.filter((p) => p.track === 'Commercial').length}</span>
+              </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className="font-semibold text-gray-500">Track:</span>
-                <select
-                  value={trackFilter}
-                  onChange={(e) => setTrackFilter(e.target.value)}
-                  className="px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                >
-                  <option value="All">All Tracks</option>
-                  <option value="Science">Science</option>
-                  <option value="Arts">Arts</option>
-                  <option value="Commercial">Commercial</option>
-                </select>
+            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
+              <div className="flex items-center justify-between text-gray-500 text-xs font-bold uppercase tracking-wider">
+                <span>Question Bank Size</span>
+                <span className="text-lg">📚</span>
               </div>
-
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className="font-semibold text-gray-500">Role:</span>
-                <select
-                  value={roleFilter}
-                  onChange={(e) => setRoleFilter(e.target.value)}
-                  className="px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                >
-                  <option value="All">All Roles</option>
-                  <option value="student">Student</option>
-                  <option value="admin">Admin</option>
-                  <option value="super_admin">Super Admin</option>
-                </select>
+              <div className="text-3xl font-extrabold text-emerald-700 mt-2 font-mono">
+                {allQuestionsSummary.length}
               </div>
+              <div className="mt-2 text-xs text-gray-500">
+                Across {subjects.length} registered UTME subjects
+              </div>
+            </div>
 
-              <button
-                onClick={fetchProfiles}
-                className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50 cursor-pointer"
-              >
-                ↻ Refresh
-              </button>
+            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
+              <div className="flex items-center justify-between text-gray-500 text-xs font-bold uppercase tracking-wider">
+                <span>Administrative Team</span>
+                <span className="text-lg">🛡️</span>
+              </div>
+              <div className="text-3xl font-extrabold text-indigo-700 mt-2 font-mono">
+                {profiles.filter((p) => p.role === 'admin' || p.role === 'super_admin').length}
+              </div>
+              <div className="mt-2 text-xs text-gray-500">
+                {profiles.filter((p) => p.role === 'super_admin').length} Super Admin(s),{' '}
+                {profiles.filter((p) => p.role === 'admin').length} Admin(s)
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
+              <div className="flex items-center justify-between text-gray-500 text-xs font-bold uppercase tracking-wider">
+                <span>Configured Exam Time</span>
+                <span className="text-lg">⏱️</span>
+              </div>
+              <div className="text-3xl font-extrabold text-slate-800 mt-2 font-mono">
+                {cbtSettings.examDuration} <span className="text-sm font-sans font-medium text-gray-400">min</span>
+              </div>
+              <div className="mt-2 text-xs text-gray-500">
+                Pass mark: {cbtSettings.passingThreshold}% • {cbtSettings.questionsPerSubject} Qs/subj
+              </div>
             </div>
           </div>
 
-          {/* User Table (Desktop) & Cards (Mobile) */}
-          {loadingProfiles ? (
-            <div className="bg-white p-12 text-center rounded-xl border border-gray-200">
-              <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
-              <p className="mt-3 text-xs text-gray-500">Loading candidate profiles from Supabase...</p>
-            </div>
-          ) : filteredProfiles.length === 0 ? (
-            <div className="bg-white p-12 text-center rounded-xl border border-gray-200">
-              <span className="text-3xl">🔍</span>
-              <h3 className="mt-2 text-sm font-bold text-gray-900">No candidates match the filter</h3>
-              <p className="mt-1 text-xs text-gray-500">Try clearing your search query or selecting a different track.</p>
-            </div>
-          ) : (
-            <div className="bg-white rounded-xl border border-gray-200 shadow-2xs overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs sm:text-sm">
-                  <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[11px]">
-                    <tr>
-                      <th className="py-3 px-4">Candidate Profile</th>
-                      <th className="py-3 px-4">Academic Track</th>
-                      <th className="py-3 px-4">Role</th>
-                      <th className="py-3 px-4">Registered On</th>
-                      <th className="py-3 px-4 text-right">Role Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {filteredProfiles.map((p) => (
-                      <tr key={p.id} className="hover:bg-gray-50/70 transition-colors">
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 font-bold flex items-center justify-center text-xs">
-                              {(p.full_name || 'U').charAt(0).toUpperCase()}
-                            </div>
-                            <div>
-                              <div className="font-semibold text-gray-900">{p.full_name || 'Unnamed Candidate'}</div>
-                              <div className="text-[11px] font-mono text-gray-400 truncate max-w-[180px] sm:max-w-none">
-                                ID: {p.id}
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-
-                        <td className="py-3.5 px-4">
-                          <span
-                            className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                              p.track === 'Science'
-                                ? 'bg-blue-100 text-blue-700'
-                                : p.track === 'Arts'
-                                ? 'bg-purple-100 text-purple-700'
-                                : 'bg-amber-100 text-amber-800'
-                            }`}
-                          >
-                            {p.track}
-                          </span>
-                        </td>
-
-                        <td className="py-3.5 px-4">
-                          <span
-                            className={`px-2.5 py-0.5 rounded-full text-xs font-semibold uppercase tracking-wider ${
-                              p.role === 'super_admin'
-                                ? 'bg-indigo-100 text-indigo-700'
-                                : p.role === 'admin'
-                                ? 'bg-emerald-100 text-emerald-700'
-                                : 'bg-gray-100 text-gray-700'
-                            }`}
-                          >
-                            {p.role}
-                          </span>
-                        </td>
-
-                        <td className="py-3.5 px-4 text-gray-500 text-xs">
-                          {new Date(p.created_at).toLocaleDateString()}
-                        </td>
-
-                        <td className="py-3.5 px-4 text-right">
-                          {p.role === 'student' ? (
-                            <button
-                              onClick={() => handleUpdateRole(p.id, 'admin')}
-                              className="px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
-                            >
-                              Promote to Admin
-                            </button>
-                          ) : p.role === 'admin' ? (
-                            <button
-                              onClick={() => handleUpdateRole(p.id, 'student')}
-                              className="px-3 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
-                            >
-                              Demote to Student
-                            </button>
-                          ) : (
-                            <span className="text-xs text-gray-400 italic">Protected</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          {/* Subject Readiness Breakdown */}
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden">
+            <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm sm:text-base font-bold text-gray-900">
+                  UTME Subject Question Distribution & CBT Readiness
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Standard JAMB exam requires at least 40 questions per subject bank.
+                </p>
               </div>
             </div>
-          )}
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs sm:text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[11px]">
+                  <tr>
+                    <th className="py-3 px-4">Subject</th>
+                    <th className="py-3 px-4">Code</th>
+                    <th className="py-3 px-4">Questions in Bank</th>
+                    <th className="py-3 px-4">Readiness Status</th>
+                    <th className="py-3 px-4 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {subjects.map((s) => {
+                    const count = subjectQuestionCounts[s.id] || 0
+                    const isReady = count >= cbtSettings.questionsPerSubject
+                    return (
+                      <tr key={s.id} className="hover:bg-gray-50/70 transition-colors">
+                        <td className="py-3 px-4 font-semibold text-gray-900 flex items-center gap-2">
+                          <span>{s.icon || '📖'}</span>
+                          <span>{s.name}</span>
+                          {s.is_compulsory && (
+                            <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-bold">
+                              Compulsory
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 font-mono text-gray-600">{s.code}</td>
+                        <td className="py-3 px-4 font-mono font-bold text-gray-900">{count}</td>
+                        <td className="py-3 px-4">
+                          {isReady ? (
+                            <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 flex items-center gap-1 w-fit">
+                              <span>✓</span>
+                              <span>Ready ({count}/{cbtSettings.questionsPerSubject})</span>
+                            </span>
+                          ) : (
+                            <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 flex items-center gap-1 w-fit">
+                              <span>⚠️</span>
+                              <span>Needs Questions ({count}/{cbtSettings.questionsPerSubject})</span>
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <button
+                            onClick={() => {
+                              setSelectedSubjectId(s.id)
+                              setActiveTab('questions')
+                            }}
+                            className="text-xs font-semibold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer"
+                          >
+                            Manage Bank →
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Track Distribution & Recent Candidates */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
+              <h3 className="text-sm font-bold text-gray-900 mb-3">Track Distribution</h3>
+              <div className="space-y-3">
+                {[
+                  { name: 'Science', color: 'bg-blue-500', count: profiles.filter((p) => p.track === 'Science').length },
+                  { name: 'Arts', color: 'bg-purple-500', count: profiles.filter((p) => p.track === 'Arts').length },
+                  { name: 'Commercial', color: 'bg-amber-500', count: profiles.filter((p) => p.track === 'Commercial').length },
+                ].map((t) => {
+                  const pct = profiles.length > 0 ? Math.round((t.count / profiles.length) * 100) : 0
+                  return (
+                    <div key={t.name}>
+                      <div className="flex justify-between text-xs font-medium text-gray-700 mb-1">
+                        <span>{t.name}</span>
+                        <span className="font-mono">{t.count} ({pct}%)</span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-gray-100 overflow-hidden">
+                        <div className={`h-full ${t.color}`} style={{ width: `${pct}%` }}></div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs">
+              <h3 className="text-sm font-bold text-gray-900 mb-3">Recently Registered Candidates</h3>
+              <div className="divide-y divide-gray-100 text-xs">
+                {profiles.slice(0, 5).map((p) => (
+                  <div key={p.id} className="py-2 flex items-center justify-between">
+                    <div>
+                      <div className="font-semibold text-gray-900">{p.full_name || 'Unnamed Candidate'}</div>
+                      <div className="text-[10px] text-gray-400 font-mono truncate max-w-xs">{p.id}</div>
+                    </div>
+                    <span className="text-[11px] font-semibold text-gray-500">{p.track}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* ========================================================================= */}
-      {/* SECTION 2: QUESTION BANK EDITOR (With Bulk CSV Upload)                    */}
-      {/* ========================================================================= */}
+      {/* ======================================================================= */}
+      {/* SECTION 2: QUESTION BANK EDITOR (Admin & Super Admin)                   */}
+      {/* ======================================================================= */}
       {activeTab === 'questions' && (
         <div className="space-y-4">
           {questionActionMsg && (
@@ -864,34 +1257,74 @@ export const Admin: React.FC = () => {
             </div>
           )}
 
-          {/* Action bar: Subject selector & Action CTAs */}
-          <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-2 w-full sm:w-auto">
-              <label htmlFor="subject-select" className="text-xs font-bold uppercase text-gray-500 whitespace-nowrap">
-                Select Subject:
-              </label>
-              <select
-                id="subject-select"
-                value={selectedSubjectId}
-                onChange={(e) => setSelectedSubjectId(e.target.value)}
-                className="px-3 py-2 border border-gray-300 rounded-lg bg-white text-xs sm:text-sm font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 w-full sm:w-64"
-              >
-                {subjects.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} ({s.code})
-                  </option>
-                ))}
-              </select>
+          {/* Action bar: Subject selector & Management CTAs */}
+          <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-2xs flex flex-col lg:flex-row items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto">
+              {/* Subject Selector */}
+              <div className="flex items-center gap-2">
+                <label htmlFor="subject-select" className="text-xs font-bold uppercase text-gray-500 whitespace-nowrap">
+                  Subject:
+                </label>
+                <select
+                  id="subject-select"
+                  value={selectedSubjectId}
+                  onChange={(e) => setSelectedSubjectId(e.target.value)}
+                  className="px-3 py-2 border border-gray-300 rounded-lg bg-white text-xs sm:text-sm font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  {subjects.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.code}) - {subjectQuestionCounts[s.id] || 0} Qs
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Exam Year Filter */}
+              <div className="flex items-center gap-1.5">
+                <label htmlFor="year-select" className="text-xs font-bold uppercase text-gray-500 whitespace-nowrap">
+                  Year:
+                </label>
+                <select
+                  id="year-select"
+                  value={examYearFilter}
+                  onChange={(e) => {
+                    setExamYearFilter(e.target.value)
+                    setCurrentPage(1)
+                  }}
+                  className="px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  <option value="All">All Years</option>
+                  {availableYears.map((yr) => (
+                    <option key={yr} value={yr}>
+                      UTME {yr}
+                    </option>
+                  ))}
+                  <option value="Unspecified">Unspecified Year</option>
+                </select>
+              </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+            {/* Question Actions */}
+            <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-end">
+              {/* Export to CSV Button */}
+              <button
+                type="button"
+                onClick={handleExportCSV}
+                disabled={questions.length === 0}
+                className="px-3.5 py-2 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-40"
+              >
+                <span>📥</span>
+                <span>Export to CSV</span>
+              </button>
+
               {/* Bulk CSV Upload Button */}
               <button
+                type="button"
                 onClick={() => {
                   setBulkError(null)
                   setShowBulkUploadModal(true)
                 }}
-                className="flex-1 sm:flex-none px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer flex items-center gap-1.5"
               >
                 <span>📂</span>
                 <span>Bulk CSV Upload</span>
@@ -899,512 +1332,1085 @@ export const Admin: React.FC = () => {
 
               {/* Add Single Question Button */}
               <button
+                type="button"
                 onClick={handleOpenAddQuestionModal}
-                className="flex-1 sm:flex-none px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer flex items-center gap-1.5"
               >
                 <span>＋</span>
-                <span>Add Single Question</span>
+                <span>Add Question</span>
               </button>
+
+              {/* Bulk Wipe Button (Super Admin Only) */}
+              {isSuperAdmin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWipeConfirmationInput('')
+                    setShowBulkWipeModal(true)
+                  }}
+                  disabled={questions.length === 0}
+                  className="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 rounded-lg text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1 disabled:opacity-40"
+                >
+                  <span>🗑️</span>
+                  <span>Wipe Subject Bank</span>
+                </button>
+              )}
             </div>
           </div>
 
-          {/* ===================================================================== */}
-          {/* BULK CSV UPLOAD MODAL COMPONENT                                       */}
-          {/* ===================================================================== */}
-          {showBulkUploadModal && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
-              <div className="bg-white rounded-2xl max-w-3xl w-full p-6 sm:p-8 shadow-2xl border border-gray-200 my-8 space-y-5 animate-in fade-in zoom-in-95 duration-150">
-                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <div className="flex items-center gap-2.5">
-                    <span className="w-9 h-9 rounded-xl bg-slate-100 text-slate-800 flex items-center justify-center text-lg">
-                      📂
-                    </span>
-                    <div>
-                      <h3 className="text-lg font-bold text-gray-900">Bulk CSV Question Bank Importer</h3>
-                      <p className="text-xs text-gray-500">
-                        Upload multiple UTME questions at once and map them automatically to registered subjects.
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      if (!uploadingCsv) setShowBulkUploadModal(false)
-                    }}
-                    className="p-1 rounded-lg text-gray-400 hover:text-gray-600"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                {/* Error Banner inside modal */}
-                {bulkError && (
-                  <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs sm:text-sm flex items-start gap-2.5">
-                    <span className="text-red-500 text-base leading-none">⚠️</span>
-                    <div className="flex-1 font-medium">{bulkError}</div>
-                  </div>
-                )}
-
-                {/* File Upload & Template Download Action Bar */}
-                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-4 rounded-xl bg-slate-50 border border-slate-200">
-                  <div>
-                    <div className="text-xs font-semibold text-slate-700">Required CSV Column Format (9 Columns):</div>
-                    <div className="text-[11px] font-mono text-slate-500 mt-0.5">
-                      Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Image URL
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleDownloadTemplate}
-                    className="w-full sm:w-auto px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg shrink-0 flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <span>📥</span>
-                    <span>Download Template</span>
-                  </button>
-                </div>
-
-                {/* Drag-and-drop / File Input Zone */}
-                <div className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center hover:border-emerald-500 hover:bg-emerald-50/20 transition-all">
-                  <input
-                    type="file"
-                    id="csv-file-input"
-                    accept=".csv,text/csv"
-                    onChange={handleFileUpload}
-                    className="hidden"
-                    disabled={uploadingCsv}
-                  />
-                  <label
-                    htmlFor="csv-file-input"
-                    className="cursor-pointer flex flex-col items-center justify-center space-y-2"
-                  >
-                    <span className="text-3xl">📄</span>
-                    <span className="text-xs sm:text-sm font-semibold text-gray-700">
-                      {csvFileName ? `Selected: ${csvFileName}` : 'Click here or drag a .csv file to parse questions'}
-                    </span>
-                    <span className="text-[11px] text-gray-400">
-                      Supports comma-separated values with quoted strings
-                    </span>
-                  </label>
-                </div>
-
-                {/* Parsing Spinner */}
-                {parsingCsv && (
-                  <div className="py-6 text-center">
-                    <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
-                    <p className="mt-2 text-xs text-gray-500 font-medium">Parsing and validating rows...</p>
-                  </div>
-                )}
-
-                {/* Parsed Preview Table */}
-                {parsedQuestions.length > 0 && (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-gray-700">Parsed Questions:</span>
-                        <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
-                          {validCount} Valid
-                        </span>
-                        {invalidCount > 0 && (
-                          <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-800">
-                            {invalidCount} Invalid
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="max-h-60 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100 text-xs">
-                      {parsedQuestions.map((q) => (
-                        <div
-                          key={q.rowNumber}
-                          className={`p-3 flex items-start justify-between gap-3 ${
-                            q.isValid ? 'bg-white' : 'bg-red-50/50'
-                          }`}
-                        >
-                          <div className="space-y-1 flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-[10px] text-gray-400">Row {q.rowNumber}</span>
-                              <span
-                                className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
-                                  q.subjectId ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
-                                }`}
-                              >
-                                {q.subjectName} ({q.rawSubject})
-                              </span>
-                              {q.correctOption && (
-                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-100 text-gray-700">
-                                  Correct: {q.correctOption}
-                                </span>
-                              )}
-                            </div>
-
-                            <p className="font-medium text-gray-900 line-clamp-2">{q.questionText}</p>
-
-                            {q.imageUrl && (
-                              <div className="text-[11px] text-emerald-700 flex items-center gap-1.5 font-medium">
-                                <span>🖼️ Diagram:</span>
-                                <span className="font-mono text-gray-600 truncate max-w-sm">{q.imageUrl}</span>
-                              </div>
-                            )}
-
-                            <div className="text-[11px] text-gray-500 truncate">
-                              A: {q.optionA} | B: {q.optionB} | C: {q.optionC} | D: {q.optionD}
-                            </div>
-
-                            {!q.isValid && (
-                              <div className="text-red-600 font-medium text-[11px] flex items-center gap-1">
-                                <span>⚠️</span>
-                                <span>{q.validationError}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Modal Footer Actions */}
-                <div className="pt-3 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-gray-100">
-                  <div className="text-xs text-gray-500">
-                    {validCount > 0 ? (
-                      <span>
-                        Ready to insert <strong className="text-emerald-700">{validCount}</strong> verified questions.
-                      </span>
-                    ) : (
-                      <span>Select a valid CSV file to preview.</span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2 w-full sm:w-auto">
-                    <button
-                      type="button"
-                      disabled={uploadingCsv}
-                      onClick={() => setShowBulkUploadModal(false)}
-                      className="flex-1 sm:flex-none px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-xs sm:text-sm font-semibold cursor-pointer disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      disabled={validCount === 0 || uploadingCsv}
-                      onClick={handleBatchInsertQuestions}
-                      className="flex-1 sm:flex-none px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-sm transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
-                    >
-                      {uploadingCsv ? (
-                        <>
-                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                          <span>Inserting Questions...</span>
-                        </>
-                      ) : (
-                        `Confirm & Import ${validCount} Questions`
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
+          {/* Search bar inside Question Bank */}
+          <div className="bg-white p-3.5 rounded-xl border border-gray-200 shadow-2xs flex items-center justify-between gap-3">
+            <div className="relative flex-1">
+              <input
+                type="text"
+                placeholder="Search questions by text or explanation keywords..."
+                value={questionSearch}
+                onChange={(e) => {
+                  setQuestionSearch(e.target.value)
+                  setCurrentPage(1)
+                }}
+                className="w-full px-3.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+              {questionSearch && (
+                <button
+                  onClick={() => setQuestionSearch('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs"
+                >
+                  ✕
+                </button>
+              )}
             </div>
-          )}
-
-          {/* Add Single Question Modal */}
-          {showAddQuestionModal && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
-              <div className="bg-white rounded-2xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl border border-gray-200 my-8">
-                <div className="flex items-center justify-between pb-4 border-b border-gray-100">
-                  <div>
-                    <h3 className="text-lg font-bold text-gray-900">
-                      {editingQuestionId ? 'Edit UTME Question' : 'Add New UTME Question'}
-                    </h3>
-                    <p className="text-xs text-gray-500">
-                      {editingQuestionId
-                        ? 'Update question stem, diagram, choices, or explanation.'
-                        : 'Provide verified past question stem, options, diagram, and explanation.'}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setShowAddQuestionModal(false)}
-                    className="p-1 rounded-lg text-gray-400 hover:text-gray-600 cursor-pointer"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <form onSubmit={handleSaveQuestion} className="mt-4 space-y-4 text-xs sm:text-sm">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Target Subject</label>
-                      <select
-                        value={newSubjectId}
-                        onChange={(e) => setNewSubjectId(e.target.value)}
-                        required
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      >
-                        {subjects.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name} ({s.code})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Exam Year (Optional)</label>
-                      <input
-                        type="number"
-                        placeholder="e.g. 2024"
-                        value={newExamYear}
-                        onChange={(e) => setNewExamYear(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Question Text</label>
-                    <textarea
-                      required
-                      rows={3}
-                      placeholder="Type the full question prompt or problem statement here..."
-                      value={newQuestionText}
-                      onChange={(e) => setNewQuestionText(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">
-                      Question Diagram / Image URL (Optional)
-                    </label>
-                    <input
-                      type="url"
-                      placeholder="e.g. https://example.com/diagram.png (leave blank if question has no diagram)"
-                      value={newImageUrl}
-                      onChange={(e) => setNewImageUrl(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    />
-                    {newImageUrl.trim() && (
-                      <div className="mt-2 p-2 bg-gray-50 border border-gray-200 rounded-lg flex items-center gap-3">
-                        <img
-                          src={newImageUrl.trim()}
-                          alt="Diagram Preview"
-                          className="h-16 w-auto max-w-[120px] object-contain rounded border border-gray-200 bg-white"
-                          onError={(e) => {
-                            ;(e.target as HTMLImageElement).style.display = 'none'
-                          }}
-                        />
-                        <span className="text-[11px] text-gray-500 truncate">
-                          Diagram preview. Ensure image is publicly accessible.
-                        </span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Options A through D */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Option A</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="First choice"
-                        value={newOptionA}
-                        onChange={(e) => setNewOptionA(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Option B</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="Second choice"
-                        value={newOptionB}
-                        onChange={(e) => setNewOptionB(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Option C</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="Third choice"
-                        value={newOptionC}
-                        onChange={(e) => setNewOptionC(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Option D</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="Fourth choice"
-                        value={newOptionD}
-                        onChange={(e) => setNewOptionD(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Correct Option Selector */}
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Correct Option</label>
-                    <div className="flex gap-4">
-                      {(['A', 'B', 'C', 'D'] as const).map((opt) => (
-                        <label key={opt} className="inline-flex items-center gap-1.5 cursor-pointer">
-                          <input
-                            type="radio"
-                            name="correct_option"
-                            value={opt}
-                            checked={newCorrectOption === opt}
-                            onChange={() => setNewCorrectOption(opt)}
-                            className="text-emerald-600 focus:ring-emerald-500"
-                          />
-                          <span className="font-bold text-gray-800">Option {opt}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">
-                      Detailed Explanation (Shown to students in review mode)
-                    </label>
-                    <textarea
-                      rows={2}
-                      placeholder="Explain the solution step-by-step..."
-                      value={newExplanation}
-                      onChange={(e) => setNewExplanation(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    />
-                  </div>
-
-                  <div className="pt-3 flex justify-end gap-2 border-t border-gray-100">
-                    <button
-                      type="button"
-                      onClick={() => setShowAddQuestionModal(false)}
-                      className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-xs sm:text-sm font-semibold cursor-pointer"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={submittingQuestion}
-                      className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-sm transition-colors disabled:opacity-50 cursor-pointer"
-                    >
-                      {submittingQuestion
-                        ? (editingQuestionId ? 'Updating...' : 'Saving to Database...')
-                        : (editingQuestionId ? 'Update Question' : 'Save Question')}
-                    </button>
-                  </div>
-                </form>
-              </div>
+            <div className="text-xs text-gray-500 whitespace-nowrap">
+              Showing <strong className="text-gray-900">{filteredQuestions.length}</strong> of{' '}
+              <strong className="text-gray-900">{questions.length}</strong> questions
             </div>
-          )}
+          </div>
 
-          {/* Questions List for Current Subject */}
+          {/* Questions List & Pagination */}
           {loadingQuestions ? (
             <div className="bg-white p-12 text-center rounded-xl border border-gray-200">
               <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
               <p className="mt-3 text-xs text-gray-500">Fetching questions from Supabase questions table...</p>
             </div>
-          ) : questions.length === 0 ? (
+          ) : filteredQuestions.length === 0 ? (
             <div className="bg-white p-12 text-center rounded-xl border border-gray-200">
               <span className="text-3xl">📝</span>
-              <h3 className="mt-2 text-sm font-bold text-gray-900">No questions found for this subject</h3>
+              <h3 className="mt-2 text-sm font-bold text-gray-900">No matching questions found</h3>
               <p className="mt-1 text-xs text-gray-500">
-                Click "+ Add Single Question" or "📂 Bulk CSV Upload" to add past questions to this subject bank.
+                {questions.length === 0
+                  ? 'Click "+ Add Question" or "📂 Bulk CSV Upload" to add past questions.'
+                  : 'Try clearing your search query or changing the exam year filter.'}
               </p>
             </div>
           ) : (
             <div className="space-y-3">
-              {questions.map((q, idx) => (
-                <div key={q.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-2xs space-y-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-800 font-bold flex items-center justify-center text-xs">
-                        {idx + 1}
-                      </span>
-                      {q.exam_year && (
-                        <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-gray-100 text-gray-600">
-                          UTME {q.exam_year}
+              {paginatedQuestions.map((q, idx) => {
+                const questionNumber = (currentPage - 1) * questionsPerPage + idx + 1
+                return (
+                  <div key={q.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-2xs space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-800 font-bold flex items-center justify-center text-xs">
+                          {questionNumber}
                         </span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => handleOpenEditQuestionModal(q)}
-                        className="text-xs text-emerald-600 hover:text-emerald-700 font-semibold px-2 py-1 rounded hover:bg-emerald-50 border border-transparent hover:border-emerald-200 transition-colors cursor-pointer"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => handleDeleteQuestion(q.id)}
-                        className="text-xs text-red-600 hover:text-red-700 font-semibold px-2 py-1 rounded hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors cursor-pointer"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-
-                  {q.image_url && (
-                    <div className="my-2">
-                      <img
-                        src={q.image_url}
-                        alt="Question diagram"
-                        className="max-h-48 max-w-full object-contain rounded-md border border-gray-200 bg-white"
-                      />
-                    </div>
-                  )}
-
-                  <p className="text-sm font-medium text-gray-900">{q.question_text}</p>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                    {[
-                      { key: 'A', text: q.option_a },
-                      { key: 'B', text: q.option_b },
-                      { key: 'C', text: q.option_c },
-                      { key: 'D', text: q.option_d },
-                    ].map((opt) => (
-                      <div
-                        key={opt.key}
-                        className={`p-2.5 rounded-lg border flex items-center gap-2 ${
-                          opt.key === q.correct_option
-                            ? 'bg-emerald-50 border-emerald-300 text-emerald-950 font-semibold'
-                            : 'bg-gray-50 border-gray-200 text-gray-700'
-                        }`}
-                      >
-                        <span
-                          className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                            opt.key === q.correct_option
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-gray-200 text-gray-600'
-                          }`}
-                        >
-                          {opt.key}
-                        </span>
-                        <span>{opt.text}</span>
-                        {opt.key === q.correct_option && (
-                          <span className="ml-auto text-[10px] uppercase font-bold text-emerald-600">
-                            Correct
+                        {q.exam_year && (
+                          <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-gray-100 text-gray-600">
+                            UTME {q.exam_year}
                           </span>
                         )}
+                        <span className="text-[11px] text-gray-400 font-mono">ID: {q.id.slice(0, 8)}...</span>
                       </div>
-                    ))}
-                  </div>
 
-                  {q.explanation && (
-                    <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700">
-                      <strong>Explanation:</strong> {q.explanation}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => handleOpenEditQuestionModal(q)}
+                          className="text-xs text-emerald-600 hover:text-emerald-700 font-semibold px-2 py-1 rounded hover:bg-emerald-50 border border-transparent hover:border-emerald-200 transition-colors cursor-pointer"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDeleteQuestion(q.id)}
+                          className="text-xs text-red-600 hover:text-red-700 font-semibold px-2 py-1 rounded hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors cursor-pointer"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+
+                    {q.image_url && (
+                      <div className="my-2">
+                        <img
+                          src={q.image_url}
+                          alt="Question diagram"
+                          className="max-h-48 max-w-full object-contain rounded-md border border-gray-200 bg-white"
+                        />
+                      </div>
+                    )}
+
+                    <p className="text-sm font-medium text-gray-900 leading-relaxed">{q.question_text}</p>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      {[
+                        { key: 'A', text: q.option_a },
+                        { key: 'B', text: q.option_b },
+                        { key: 'C', text: q.option_c },
+                        { key: 'D', text: q.option_d },
+                      ].map((opt) => (
+                        <div
+                          key={opt.key}
+                          className={`p-2.5 rounded-lg border flex items-center gap-2 ${
+                            opt.key === q.correct_option
+                              ? 'bg-emerald-50 border-emerald-300 text-emerald-950 font-semibold'
+                              : 'bg-gray-50 border-gray-200 text-gray-700'
+                          }`}
+                        >
+                          <span
+                            className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                              opt.key === q.correct_option
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-gray-200 text-gray-600'
+                            }`}
+                          >
+                            {opt.key}
+                          </span>
+                          <span>{opt.text}</span>
+                          {opt.key === q.correct_option && (
+                            <span className="ml-auto text-[10px] uppercase font-bold text-emerald-600">
+                              Correct
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {q.explanation && (
+                      <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700">
+                        <strong>Explanation:</strong> {q.explanation}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+
+              {/* Pagination Controls */}
+              {totalPages > 1 && (
+                <div className="p-4 bg-white rounded-xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+                  <div className="text-gray-500">
+                    Page <strong>{currentPage}</strong> of <strong>{totalPages}</strong> (
+                    {filteredQuestions.length} total questions)
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      disabled={currentPage === 1}
+                      onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                      className="px-3 py-1.5 border border-gray-300 rounded-lg font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      ← Previous
+                    </button>
+                    <span className="font-mono text-gray-700 font-bold px-2">
+                      {currentPage} / {totalPages}
+                    </span>
+                    <button
+                      disabled={currentPage === totalPages}
+                      onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                      className="px-3 py-1.5 border border-gray-300 rounded-lg font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      Next →
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* SECTION 3: USER & ROLE MANAGEMENT (Super Admin Only)                    */}
+      {/* ======================================================================= */}
+      {activeTab === 'users' && (
+        <div className="space-y-4">
+          {!isSuperAdmin ? (
+            <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 shadow-sm space-y-3">
+              <span className="text-4xl">🔒</span>
+              <h2 className="text-xl font-extrabold text-gray-900">
+                Super Admin Access Required
+              </h2>
+              <p className="text-sm text-gray-500 max-w-md mx-auto">
+                Candidate user management, role assignments, and account deletions are restricted exclusively to Super Admins.
+              </p>
+            </div>
+          ) : (
+            <>
+              {profileActionMsg && (
+                <div
+                  className={`p-4 rounded-xl text-xs sm:text-sm flex items-center justify-between border ${
+                    profileActionMsg.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : 'bg-red-50 text-red-800 border-red-200'
+                  }`}
+                >
+                  <span>{profileActionMsg.text}</span>
+                  <button
+                    onClick={() => setProfileActionMsg(null)}
+                    className="text-gray-400 hover:text-gray-600 text-sm font-bold"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Quick Admin Grant Box */}
+              <div className="bg-gradient-to-r from-emerald-50 to-teal-50 p-4 rounded-2xl border border-emerald-200 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">⚡</span>
+                  <h3 className="text-xs sm:text-sm font-bold text-emerald-950">
+                    Assign Admin by User Name or ID
+                  </h3>
+                </div>
+                <p className="text-xs text-emerald-800">
+                  Quickly locate any student candidate and instantly elevate them to Admin privileges.
+                </p>
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="Type student name or ID to search..."
+                    value={quickGrantSearch}
+                    onChange={(e) => setQuickGrantSearch(e.target.value)}
+                    className="w-full px-3.5 py-2 text-xs sm:text-sm bg-white border border-emerald-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  {quickGrantCandidates.length > 0 && (
+                    <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-lg p-2 space-y-1.5 max-h-56 overflow-y-auto">
+                      {quickGrantCandidates.map((c) => (
+                        <div
+                          key={c.id}
+                          className="p-2 rounded-lg bg-gray-50 hover:bg-emerald-50 flex items-center justify-between gap-3 text-xs"
+                        >
+                          <div>
+                            <div className="font-bold text-gray-900">{c.full_name || 'Unnamed Student'}</div>
+                            <div className="text-[10px] font-mono text-gray-400">ID: {c.id}</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              handleUpdateRole(c.id, 'admin')
+                              setQuickGrantSearch('')
+                            }}
+                            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs cursor-pointer shadow-xs"
+                          >
+                            Grant Admin
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
-              ))}
+              </div>
+
+              {/* Search & Filters */}
+              <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row gap-3 items-center justify-between">
+                <div className="w-full sm:w-72">
+                  <input
+                    type="text"
+                    placeholder="Search candidate by name or ID..."
+                    value={userSearch}
+                    onChange={(e) => setUserSearch(e.target.value)}
+                    className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="font-semibold text-gray-500">Track:</span>
+                    <select
+                      value={trackFilter}
+                      onChange={(e) => setTrackFilter(e.target.value)}
+                      className="px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="All">All Tracks</option>
+                      <option value="Science">Science</option>
+                      <option value="Arts">Arts</option>
+                      <option value="Commercial">Commercial</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="font-semibold text-gray-500">Role:</span>
+                    <select
+                      value={roleFilter}
+                      onChange={(e) => setRoleFilter(e.target.value)}
+                      className="px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="All">All Roles</option>
+                      <option value="student">Student</option>
+                      <option value="admin">Admin</option>
+                      <option value="super_admin">Super Admin</option>
+                    </select>
+                  </div>
+
+                  <button
+                    onClick={fetchProfiles}
+                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50 cursor-pointer"
+                  >
+                    ↻ Refresh
+                  </button>
+                </div>
+              </div>
+
+              {/* User Table (Desktop) & Cards (Mobile) */}
+              {loadingProfiles ? (
+                <div className="bg-white p-12 text-center rounded-xl border border-gray-200">
+                  <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                  <p className="mt-3 text-xs text-gray-500">Loading candidate profiles from Supabase...</p>
+                </div>
+              ) : filteredProfiles.length === 0 ? (
+                <div className="bg-white p-12 text-center rounded-xl border border-gray-200">
+                  <span className="text-3xl">🔍</span>
+                  <h3 className="mt-2 text-sm font-bold text-gray-900">No candidates match the filter</h3>
+                  <p className="mt-1 text-xs text-gray-500">Try clearing your search query or selecting a different track.</p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-xl border border-gray-200 shadow-2xs overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs sm:text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[11px]">
+                        <tr>
+                          <th className="py-3 px-4">Candidate Profile</th>
+                          <th className="py-3 px-4">Track</th>
+                          <th className="py-3 px-4">Current Role</th>
+                          <th className="py-3 px-4">Role Switcher</th>
+                          <th className="py-3 px-4 text-right">Account Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {filteredProfiles.map((p) => {
+                          const isSelf = p.id === currentUser?.id
+                          return (
+                            <tr key={p.id} className="hover:bg-gray-50/70 transition-colors">
+                              <td className="py-3.5 px-4">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 font-bold flex items-center justify-center text-xs">
+                                    {(p.full_name || 'U').charAt(0).toUpperCase()}
+                                  </div>
+                                  <div>
+                                    <div className="font-semibold text-gray-900 flex items-center gap-1.5">
+                                      <span>{p.full_name || 'Unnamed Candidate'}</span>
+                                      {isSelf && (
+                                        <span className="text-[10px] bg-indigo-100 text-indigo-700 font-bold px-1.5 py-0.2 rounded">
+                                          You
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[11px] font-mono text-gray-400 truncate max-w-[180px] sm:max-w-none">
+                                      ID: {p.id}
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+
+                              <td className="py-3.5 px-4">
+                                <span
+                                  className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                                    p.track === 'Science'
+                                      ? 'bg-blue-100 text-blue-700'
+                                      : p.track === 'Arts'
+                                      ? 'bg-purple-100 text-purple-700'
+                                      : 'bg-amber-100 text-amber-800'
+                                  }`}
+                                >
+                                  {p.track}
+                                </span>
+                              </td>
+
+                              <td className="py-3.5 px-4">
+                                <span
+                                  className={`px-2.5 py-0.5 rounded-full text-xs font-semibold uppercase tracking-wider ${
+                                    p.role === 'super_admin'
+                                      ? 'bg-indigo-100 text-indigo-700'
+                                      : p.role === 'admin'
+                                      ? 'bg-emerald-100 text-emerald-700'
+                                      : 'bg-gray-100 text-gray-700'
+                                  }`}
+                                >
+                                  {p.role}
+                                </span>
+                              </td>
+
+                              {/* Role Switcher Dropdown */}
+                              <td className="py-3.5 px-4">
+                                {isSelf ? (
+                                  <span className="text-xs text-gray-400 italic font-mono">
+                                    Super Admin (Locked)
+                                  </span>
+                                ) : (
+                                  <select
+                                    value={p.role}
+                                    onChange={(e) =>
+                                      handleUpdateRole(
+                                        p.id,
+                                        e.target.value as 'student' | 'admin' | 'super_admin'
+                                      )
+                                    }
+                                    className="px-2.5 py-1 text-xs border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+                                  >
+                                    <option value="student">Student</option>
+                                    <option value="admin">Admin</option>
+                                    {p.role === 'super_admin' && (
+                                      <option value="super_admin">Super Admin</option>
+                                    )}
+                                  </select>
+                                )}
+                              </td>
+
+                              {/* Delete Account */}
+                              <td className="py-3.5 px-4 text-right">
+                                {isSelf ? (
+                                  <span className="text-xs text-gray-400 italic">Self Account</span>
+                                ) : (
+                                  <button
+                                    onClick={() => setUserToDelete(p)}
+                                    className="px-2.5 py-1 text-xs font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 rounded-lg transition-colors cursor-pointer"
+                                  >
+                                    Delete Account
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* SECTION 4: GLOBAL CBT SETTINGS (Super Admin Only)                       */}
+      {/* ======================================================================= */}
+      {activeTab === 'settings' && (
+        <div className="space-y-4">
+          {!isSuperAdmin ? (
+            <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 shadow-sm space-y-3">
+              <span className="text-4xl">🔒</span>
+              <h2 className="text-xl font-extrabold text-gray-900">
+                Super Admin Access Required
+              </h2>
+              <p className="text-sm text-gray-500 max-w-md mx-auto">
+                Global examination duration, passing marks, and subject rules can only be modified by Super Admins.
+              </p>
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs p-6 sm:p-8 max-w-2xl space-y-6">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">
+                  Global CBT Examination Configuration
+                </h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  Adjust default parameters for candidate mock exams. Settings are stored in system local storage and dynamically referenced by the Quiz simulator.
+                </p>
+              </div>
+
+              {settingsSavedMsg && (
+                <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs sm:text-sm font-medium flex items-center gap-2">
+                  <span>✓</span>
+                  <span>{settingsSavedMsg}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleSaveSettings} className="space-y-5 text-xs sm:text-sm">
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
+                    Exam Duration (Minutes)
+                  </label>
+                  <input
+                    type="number"
+                    min="10"
+                    max="300"
+                    required
+                    value={cbtSettings.examDuration}
+                    onChange={(e) =>
+                      setCbtSettings({
+                        ...cbtSettings,
+                        examDuration: parseInt(e.target.value, 10) || 120,
+                      })
+                    }
+                    className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Standard JAMB UTME duration is 120 minutes (2 hours). The countdown timer on Quiz.tsx will initialize with this duration.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
+                    Passing Threshold (%)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="100"
+                    required
+                    value={cbtSettings.passingThreshold}
+                    onChange={(e) =>
+                      setCbtSettings({
+                        ...cbtSettings,
+                        passingThreshold: parseInt(e.target.value, 10) || 50,
+                      })
+                    }
+                    className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Minimum aggregate percentage to classify candidate result as a Pass (Default: 50%).
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
+                    Target Questions Per Subject
+                  </label>
+                  <input
+                    type="number"
+                    min="5"
+                    max="100"
+                    required
+                    value={cbtSettings.questionsPerSubject}
+                    onChange={(e) =>
+                      setCbtSettings({
+                        ...cbtSettings,
+                        questionsPerSubject: parseInt(e.target.value, 10) || 40,
+                      })
+                    }
+                    className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Number of questions expected for standard UTME subject testing (Default: 40 questions).
+                  </p>
+                </div>
+
+                {cbtSettings.lastUpdated && (
+                  <div className="text-[11px] text-gray-400 italic">
+                    Last modified: {new Date(cbtSettings.lastUpdated).toLocaleString()}
+                  </div>
+                )}
+
+                <div className="pt-3 flex flex-col sm:flex-row gap-3 border-t border-gray-100">
+                  <button
+                    type="submit"
+                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold shadow-sm transition-colors cursor-pointer"
+                  >
+                    Save Configuration
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetSettings}
+                    className="px-4 py-2.5 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-xl text-xs sm:text-sm font-semibold transition-colors cursor-pointer"
+                  >
+                    Reset to JAMB Defaults
+                  </button>
+                </div>
+              </form>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* MODAL 1: SAFETY CONFIRMATION FOR ACCOUNT DELETION                       */}
+      {/* ======================================================================= */}
+      {userToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-gray-200 text-center animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-14 h-14 rounded-full bg-red-100 text-red-600 text-2xl flex items-center justify-center mx-auto mb-4">
+              ⚠️
+            </div>
+            <h3 className="text-lg font-bold text-gray-900">Permanently Delete Candidate?</h3>
+            <p className="text-xs text-gray-600 mt-2 leading-relaxed">
+              Are you sure you want to delete the account for{' '}
+              <strong className="text-gray-900">
+                {userToDelete.full_name || 'this candidate'}
+              </strong>{' '}
+              (ID: <span className="font-mono text-gray-500">{userToDelete.id.slice(0, 8)}...</span>)?
+            </p>
+            <p className="text-[11px] text-red-600 mt-2 font-medium">
+              This action will permanently delete their profile and associated mock exam scores.
+            </p>
+
+            <div className="mt-6 flex gap-3">
+              <button
+                type="button"
+                disabled={deletingUser}
+                onClick={() => setUserToDelete(null)}
+                className="flex-1 py-2 px-4 border border-gray-300 text-gray-700 rounded-xl text-xs font-semibold hover:bg-gray-50 cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingUser}
+                onClick={handleConfirmDeleteUser}
+                className="flex-1 py-2 px-4 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {deletingUser ? 'Deleting...' : 'Yes, Delete Account'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* MODAL 2: BULK WIPE SUBJECT QUESTIONS (Super Admin Only)                 */}
+      {/* ======================================================================= */}
+      {showBulkWipeModal && activeSubject && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-red-200 text-center animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-14 h-14 rounded-full bg-red-100 text-red-600 text-2xl flex items-center justify-center mx-auto mb-4">
+              🗑️
+            </div>
+            <h3 className="text-lg font-extrabold text-gray-900">
+              Bulk Wipe: {activeSubject.name}
+            </h3>
+            <p className="text-xs text-gray-600 mt-2 leading-relaxed">
+              This will permanently delete all <strong className="text-red-700 font-mono">{questions.length}</strong> questions
+              currently in the question bank for <strong>{activeSubject.name}</strong>.
+            </p>
+
+            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-xl text-left text-xs text-red-800">
+              To proceed, please type <strong className="font-mono text-black">{activeSubject.name}</strong> below:
+            </div>
+
+            <input
+              type="text"
+              placeholder={`Type "${activeSubject.name}" to confirm`}
+              value={wipeConfirmationInput}
+              onChange={(e) => setWipeConfirmationInput(e.target.value)}
+              className="mt-3 w-full px-3.5 py-2 border border-gray-300 rounded-lg text-xs text-center font-bold focus:outline-none focus:ring-2 focus:ring-red-500"
+            />
+
+            <div className="mt-6 flex gap-3">
+              <button
+                type="button"
+                disabled={wipingSubject}
+                onClick={() => {
+                  setShowBulkWipeModal(false)
+                  setWipeConfirmationInput('')
+                }}
+                className="flex-1 py-2 px-4 border border-gray-300 text-gray-700 rounded-xl text-xs font-semibold hover:bg-gray-50 cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={
+                  wipingSubject ||
+                  wipeConfirmationInput.trim().toLowerCase() !== activeSubject.name.toLowerCase()
+                }
+                onClick={handleBulkWipeSubjectQuestions}
+                className="flex-1 py-2 px-4 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer disabled:opacity-40"
+              >
+                {wipingSubject ? 'Wiping...' : 'Confirm Bulk Wipe'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* MODAL 3: BULK CSV UPLOAD                                                */}
+      {/* ======================================================================= */}
+      {showBulkUploadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-3xl w-full p-6 sm:p-8 shadow-2xl border border-gray-200 my-8 space-y-5 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+              <div className="flex items-center gap-2.5">
+                <span className="w-9 h-9 rounded-xl bg-slate-100 text-slate-800 flex items-center justify-center text-lg">
+                  📂
+                </span>
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900">Bulk CSV Question Bank Importer</h3>
+                  <p className="text-xs text-gray-500">
+                    Upload multiple UTME questions at once and map them automatically to registered subjects.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  if (!uploadingCsv) setShowBulkUploadModal(false)
+                }}
+                className="p-1 rounded-lg text-gray-400 hover:text-gray-600"
+              >
+                ✕
+              </button>
+            </div>
+
+            {bulkError && (
+              <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs sm:text-sm flex items-start gap-2.5">
+                <span className="text-red-500 text-base leading-none">⚠️</span>
+                <div className="flex-1 font-medium">{bulkError}</div>
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-4 rounded-xl bg-slate-50 border border-slate-200">
+              <div>
+                <div className="text-xs font-semibold text-slate-700">Required CSV Column Format (9 Columns):</div>
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+                  Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Image URL
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleDownloadTemplate}
+                className="w-full sm:w-auto px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg shrink-0 flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <span>📥</span>
+                <span>Download Template</span>
+              </button>
+            </div>
+
+            <div className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center hover:border-emerald-500 hover:bg-emerald-50/20 transition-all">
+              <input
+                type="file"
+                id="csv-file-input"
+                accept=".csv,text/csv"
+                onChange={handleFileUpload}
+                className="hidden"
+                disabled={uploadingCsv}
+              />
+              <label
+                htmlFor="csv-file-input"
+                className="cursor-pointer flex flex-col items-center justify-center space-y-2"
+              >
+                <span className="text-3xl">📄</span>
+                <span className="text-xs sm:text-sm font-semibold text-gray-700">
+                  {csvFileName ? `Selected: ${csvFileName}` : 'Click here or drag a .csv file to parse questions'}
+                </span>
+                <span className="text-[11px] text-gray-400">
+                  Supports comma-separated values with quoted strings
+                </span>
+              </label>
+            </div>
+
+            {parsingCsv && (
+              <div className="py-6 text-center">
+                <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                <p className="mt-2 text-xs text-gray-500 font-medium">Parsing and validating rows...</p>
+              </div>
+            )}
+
+            {parsedQuestions.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-gray-700">Parsed Questions:</span>
+                    <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+                      {validCount} Valid
+                    </span>
+                    {invalidCount > 0 && (
+                      <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-800">
+                        {invalidCount} Invalid
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="max-h-60 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100 text-xs">
+                  {parsedQuestions.map((q) => (
+                    <div
+                      key={q.rowNumber}
+                      className={`p-3 flex items-start justify-between gap-3 ${
+                        q.isValid ? 'bg-white' : 'bg-red-50/50'
+                      }`}
+                    >
+                      <div className="space-y-1 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] text-gray-400">Row {q.rowNumber}</span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                              q.subjectId ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
+                            }`}
+                          >
+                            {q.subjectName} ({q.rawSubject})
+                          </span>
+                          {q.correctOption && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-100 text-gray-700">
+                              Correct: {q.correctOption}
+                            </span>
+                          )}
+                        </div>
+
+                        <p className="font-medium text-gray-900 line-clamp-2">{q.questionText}</p>
+
+                        {q.imageUrl && (
+                          <div className="text-[11px] text-emerald-700 flex items-center gap-1.5 font-medium">
+                            <span>🖼️ Diagram:</span>
+                            <span className="font-mono text-gray-600 truncate max-w-sm">{q.imageUrl}</span>
+                          </div>
+                        )}
+
+                        <div className="text-[11px] text-gray-500 truncate">
+                          A: {q.optionA} | B: {q.optionB} | C: {q.optionC} | D: {q.optionD}
+                        </div>
+
+                        {!q.isValid && (
+                          <div className="text-red-600 font-medium text-[11px] flex items-center gap-1">
+                            <span>⚠️</span>
+                            <span>{q.validationError}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="pt-3 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-gray-100">
+              <div className="text-xs text-gray-500">
+                {validCount > 0 ? (
+                  <span>
+                    Ready to insert <strong className="text-emerald-700">{validCount}</strong> verified questions.
+                  </span>
+                ) : (
+                  <span>Select a valid CSV file to preview.</span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  disabled={uploadingCsv}
+                  onClick={() => setShowBulkUploadModal(false)}
+                  className="flex-1 sm:flex-none px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-xs sm:text-sm font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={validCount === 0 || uploadingCsv}
+                  onClick={handleBatchInsertQuestions}
+                  className="flex-1 sm:flex-none px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-sm transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
+                >
+                  {uploadingCsv ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      <span>Inserting Questions...</span>
+                    </>
+                  ) : (
+                    `Confirm & Import ${validCount} Questions`
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* MODAL 4: ADD / EDIT SINGLE QUESTION                                    */}
+      {/* ======================================================================= */}
+      {showAddQuestionModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl border border-gray-200 my-8">
+            <div className="flex items-center justify-between pb-4 border-b border-gray-100">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">
+                  {editingQuestionId ? 'Edit UTME Question' : 'Add New UTME Question'}
+                </h3>
+                <p className="text-xs text-gray-500">
+                  {editingQuestionId
+                    ? 'Update question stem, diagram, choices, or explanation.'
+                    : 'Provide verified past question stem, options, diagram, and explanation.'}
+                </p>
+              </div>
+              <button
+                onClick={() => setShowAddQuestionModal(false)}
+                className="p-1 rounded-lg text-gray-400 hover:text-gray-600 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveQuestion} className="mt-4 space-y-4 text-xs sm:text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Target Subject</label>
+                  <select
+                    value={newSubjectId}
+                    onChange={(e) => setNewSubjectId(e.target.value)}
+                    required
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    {subjects.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Exam Year (Optional)</label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 2024"
+                    value={newExamYear}
+                    onChange={(e) => setNewExamYear(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Question Text</label>
+                <textarea
+                  required
+                  rows={3}
+                  placeholder="Type the full question prompt or problem statement here..."
+                  value={newQuestionText}
+                  onChange={(e) => setNewQuestionText(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  Question Diagram / Image URL (Optional)
+                </label>
+                <input
+                  type="url"
+                  placeholder="e.g. https://example.com/diagram.png (leave blank if question has no diagram)"
+                  value={newImageUrl}
+                  onChange={(e) => setNewImageUrl(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                {newImageUrl.trim() && (
+                  <div className="mt-2 p-2 bg-gray-50 border border-gray-200 rounded-lg flex items-center gap-3">
+                    <img
+                      src={newImageUrl.trim()}
+                      alt="Diagram Preview"
+                      className="h-16 w-auto max-w-[120px] object-contain rounded border border-gray-200 bg-white"
+                      onError={(e) => {
+                        ;(e.target as HTMLImageElement).style.display = 'none'
+                      }}
+                    />
+                    <span className="text-[11px] text-gray-500 truncate">
+                      Diagram preview. Ensure image is publicly accessible.
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Options A through D */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Option A</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="First choice"
+                    value={newOptionA}
+                    onChange={(e) => setNewOptionA(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Option B</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Second choice"
+                    value={newOptionB}
+                    onChange={(e) => setNewOptionB(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Option C</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Third choice"
+                    value={newOptionC}
+                    onChange={(e) => setNewOptionC(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Option D</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Fourth choice"
+                    value={newOptionD}
+                    onChange={(e) => setNewOptionD(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+
+              {/* Correct Option Selector */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Correct Option</label>
+                <div className="flex gap-4">
+                  {(['A', 'B', 'C', 'D'] as const).map((opt) => (
+                    <label key={opt} className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="correct_option"
+                        value={opt}
+                        checked={newCorrectOption === opt}
+                        onChange={() => setNewCorrectOption(opt)}
+                        className="text-emerald-600 focus:ring-emerald-500"
+                      />
+                      <span className="font-bold text-gray-800">Option {opt}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  Detailed Explanation (Shown to students in review mode)
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="Explain the solution step-by-step..."
+                  value={newExplanation}
+                  onChange={(e) => setNewExplanation(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="pt-3 flex justify-end gap-2 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setShowAddQuestionModal(false)}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-xs sm:text-sm font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingQuestion}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-sm transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  {submittingQuestion
+                    ? editingQuestionId
+                      ? 'Updating...'
+                      : 'Saving to Database...'
+                    : editingQuestionId
+                    ? 'Update Question'
+                    : 'Save Question'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

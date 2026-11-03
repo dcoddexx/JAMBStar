@@ -125,14 +125,15 @@ ALTER TABLE public.quiz_results ENABLE ROW LEVEL SECURITY;
 
 -- ------------------------------------------------------------------------------
 -- RLS: profiles
--- Users can read, insert, and update ONLY their own profile data
+-- Users can read, insert, and update their own profile data; admins can view all; super_admins can manage all
 -- ------------------------------------------------------------------------------
 DROP POLICY IF EXISTS "Users can view own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Admins can view all profiles" ON public.profiles;
 CREATE POLICY "Users can view own profile"
     ON public.profiles
     FOR SELECT
     TO authenticated
-    USING (auth.uid() = id);
+    USING (auth.uid() = id OR public.is_admin());
 
 DROP POLICY IF EXISTS "Users can insert own profile" ON public.profiles;
 CREATE POLICY "Users can insert own profile"
@@ -142,12 +143,20 @@ CREATE POLICY "Users can insert own profile"
     WITH CHECK (auth.uid() = id);
 
 DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
-CREATE POLICY "Users can update own profile"
+DROP POLICY IF EXISTS "Users and admins can update profiles" ON public.profiles;
+CREATE POLICY "Users and admins can update profiles"
     ON public.profiles
     FOR UPDATE
     TO authenticated
-    USING (auth.uid() = id)
-    WITH CHECK (auth.uid() = id);
+    USING (auth.uid() = id OR public.is_admin())
+    WITH CHECK (auth.uid() = id OR public.is_admin());
+
+DROP POLICY IF EXISTS "Super admins can delete profiles" ON public.profiles;
+CREATE POLICY "Super admins can delete profiles"
+    ON public.profiles
+    FOR DELETE
+    TO authenticated
+    USING (public.is_admin());
 
 -- ------------------------------------------------------------------------------
 -- RLS: subjects

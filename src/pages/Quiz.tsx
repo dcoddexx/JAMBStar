@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { AdBanner } from '../components/AdBanner'
@@ -61,11 +61,32 @@ export const Quiz: React.FC = () => {
   const [markedForReview, setMarkedForReview] = useState<Record<string, boolean>>({})
   const [candidateUser, setCandidateUser] = useState<{ id: string; email?: string } | null>(null)
 
+  // Dynamic Countdown Timer State (defaults to 7200 seconds = 2-hour UTME mock or reads examDuration from jambstar_cbt_settings)
+  const [timeLeft, setTimeLeft] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem('jambstar_cbt_settings')
+      if (stored) {
+        const parsed = JSON.parse(stored)
+        if (typeof parsed.examDuration === 'number' && parsed.examDuration > 0) {
+          return Math.round(parsed.examDuration * 60)
+        }
+      }
+    } catch {
+      // fallback
+    }
+    return 7200
+  })
+
+  // Confirmation Modals State
+  const [showExitConfirmModal, setShowExitConfirmModal] = useState<boolean>(false)
+  const [showSubmitConfirmModal, setShowSubmitConfirmModal] = useState<boolean>(false)
+
   // Submission & Scoring State
   const [submitting, setSubmitting] = useState<boolean>(false)
   const [showResultModal, setShowResultModal] = useState<boolean>(false)
   const [submissionResult, setSubmissionResult] = useState<QuizSubmissionResult | null>(null)
   const [reviewMode, setReviewMode] = useState<boolean>(false)
+  const isSubmittingRef = useRef<boolean>(false)
 
   // Load questions and subjects from Supabase
   useEffect(() => {
@@ -162,27 +183,89 @@ export const Quiz: React.FC = () => {
 
   const currentQ = activeQuestions[currentQuestionIndex]
 
-  // Handle option selection (A, B, C, D)
-  const handleSelectOption = (optionKey: string) => {
-    if (!currentQ || reviewMode) return
-    setSelectedAnswers((prev) => ({
-      ...prev,
-      [currentQ.id]: optionKey,
-    }))
+  const currentSubjectIndex = useMemo(() => {
+    return subjects.findIndex((s) => s.id === activeSubjectId)
+  }, [subjects, activeSubjectId])
+
+  const isLastQuestionOfSubject = currentQuestionIndex >= activeQuestions.length - 1
+  const isLastSubject = currentSubjectIndex >= subjects.length - 1
+  const isFirstQuestionOfSubject = currentQuestionIndex === 0
+  const isFirstSubject = currentSubjectIndex <= 0
+
+  // Total summary counts across all subjects
+  const totalQuestionsCount = useMemo(() => {
+    return Object.values(questionsBySubject).reduce((acc, arr) => acc + arr.length, 0)
+  }, [questionsBySubject])
+
+  const answeredQuestionsCount = useMemo(() => {
+    return Object.keys(selectedAnswers).length
+  }, [selectedAnswers])
+
+  const flaggedQuestionsCount = useMemo(() => {
+    return Object.values(markedForReview).filter(Boolean).length
+  }, [markedForReview])
+
+  // Format seconds into clean HH:MM:SS string
+  const formatTime = (seconds: number): string => {
+    const clamped = Math.max(0, seconds)
+    const hours = Math.floor(clamped / 3600)
+    const minutes = Math.floor((clamped % 3600) / 60)
+    const secs = clamped % 60
+    return `${hours.toString().padStart(2, '0')}:${minutes
+      .toString()
+      .padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
   }
 
+  // Handle option selection (A, B, C, D)
+  const handleSelectOption = useCallback(
+    (optionKey: string) => {
+      if (!currentQ || reviewMode) return
+      setSelectedAnswers((prev) => ({
+        ...prev,
+        [currentQ.id]: optionKey,
+      }))
+    },
+    [currentQ, reviewMode]
+  )
+
   // Toggle question review flag
-  const handleToggleReview = () => {
+  const handleToggleReview = useCallback(() => {
     if (!currentQ) return
     setMarkedForReview((prev) => ({
       ...prev,
       [currentQ.id]: !prev[currentQ.id],
     }))
-  }
+  }, [currentQ])
+
+  // Seamless Next Navigation: switches to next subject when last question of subject is reached
+  const handleNextQuestion = useCallback(() => {
+    if (!isLastQuestionOfSubject) {
+      setCurrentQuestionIndex((prev) => prev + 1)
+    } else if (!isLastSubject && subjects[currentSubjectIndex + 1]) {
+      const nextSubj = subjects[currentSubjectIndex + 1]
+      setActiveSubjectId(nextSubj.id)
+      setCurrentQuestionIndex(0)
+    }
+  }, [isLastQuestionOfSubject, isLastSubject, subjects, currentSubjectIndex])
+
+  // Seamless Previous Navigation
+  const handlePrevQuestion = useCallback(() => {
+    if (!isFirstQuestionOfSubject) {
+      setCurrentQuestionIndex((prev) => prev - 1)
+    } else if (!isFirstSubject && subjects[currentSubjectIndex - 1]) {
+      const prevSubj = subjects[currentSubjectIndex - 1]
+      setActiveSubjectId(prevSubj.id)
+      const prevSubjQuestions = questionsBySubject[prevSubj.id] || []
+      setCurrentQuestionIndex(Math.max(0, prevSubjQuestions.length - 1))
+    }
+  }, [isFirstQuestionOfSubject, isFirstSubject, subjects, currentSubjectIndex, questionsBySubject])
 
   // Calculate score and submit to Supabase quiz_results table
-  const handleFinalSubmit = async () => {
+  const handleFinalSubmit = useCallback(async () => {
+    if (isSubmittingRef.current) return
+    isSubmittingRef.current = true
     setSubmitting(true)
+    setShowSubmitConfirmModal(false)
 
     try {
       let totalScore = 0
@@ -266,8 +349,120 @@ export const Quiz: React.FC = () => {
       alert(`Submission failed: ${e.message}`)
     } finally {
       setSubmitting(false)
+      isSubmittingRef.current = false
     }
-  }
+  }, [subjects, questionsBySubject, selectedAnswers])
+
+  // Countdown Timer Effect: decrements timeLeft every second when exam is active
+  useEffect(() => {
+    // Freeze countdown if loading, already submitted, or in review mode
+    if (loading || reviewMode || submissionResult !== null) return
+
+    if (timeLeft <= 0) {
+      // Auto-submit when time expires
+      if (!submitting && !submissionResult && !isSubmittingRef.current) {
+        handleFinalSubmit()
+      }
+      return
+    }
+
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer)
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    return () => clearInterval(timer)
+  }, [loading, reviewMode, submissionResult, timeLeft, submitting, handleFinalSubmit])
+
+  // Global Keydown Event Listener for JAMB 8-Key Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // 1. Ensure keyboard shortcuts are ignored if reviewMode is active or loading
+      if (reviewMode || loading) return
+
+      // 2. Ensure keyboard shortcuts are ignored if user is typing inside an input field
+      const target = e.target as HTMLElement | null
+      const isTyping =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      if (isTyping) return
+
+      // 3. Ignore shortcuts if result modal or exit confirmation modal is open
+      if (showResultModal || showExitConfirmModal) return
+
+      const key = e.key.toUpperCase()
+
+      // If submission confirmation modal is open:
+      if (showSubmitConfirmModal) {
+        if (key === 'ESCAPE') {
+          e.preventDefault()
+          setShowSubmitConfirmModal(false)
+        } else if (key === 'ENTER') {
+          e.preventDefault()
+          handleFinalSubmit()
+        }
+        return
+      }
+
+      // Map keys A, B, C, D (case-insensitive) to select options for active question
+      if (['A', 'B', 'C', 'D'].includes(key)) {
+        e.preventDefault()
+        handleSelectOption(key)
+        return
+      }
+
+      // Map P to navigate to Previous question
+      if (key === 'P') {
+        e.preventDefault()
+        handlePrevQuestion()
+        return
+      }
+
+      // Map N to navigate to Next question
+      if (key === 'N') {
+        e.preventDefault()
+        handleNextQuestion()
+        return
+      }
+
+      // Map R to toggle 'Flag for Review' state
+      if (key === 'R') {
+        e.preventDefault()
+        handleToggleReview()
+        return
+      }
+
+      // Map S to trigger exam submission confirmation modal
+      if (key === 'S') {
+        e.preventDefault()
+        setShowSubmitConfirmModal(true)
+        return
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [
+    reviewMode,
+    loading,
+    showResultModal,
+    showExitConfirmModal,
+    showSubmitConfirmModal,
+    handleSelectOption,
+    handlePrevQuestion,
+    handleNextQuestion,
+    handleToggleReview,
+    handleFinalSubmit,
+  ])
 
   // Loading State UI
   if (loading) {
@@ -359,22 +554,42 @@ export const Quiz: React.FC = () => {
         </div>
 
         {/* Timer Box */}
-        <div className="flex items-center gap-3 bg-red-50 border border-red-200 px-4 py-2 rounded-lg text-red-700">
-          <span className="text-lg">⏱️</span>
+        <div
+          className={`flex items-center gap-3 px-4 py-2 rounded-lg border transition-colors ${
+            reviewMode
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : timeLeft < 300
+              ? 'bg-red-100 border-red-300 text-red-800 animate-pulse'
+              : timeLeft < 900
+              ? 'bg-amber-50 border-amber-200 text-amber-800'
+              : 'bg-red-50 border-red-200 text-red-700'
+          }`}
+        >
+          <span className="text-lg">{reviewMode ? '✓' : '⏱️'}</span>
           <div>
-            <div className="text-[10px] font-bold uppercase tracking-wider">Time Remaining</div>
+            <div className="text-[10px] font-bold uppercase tracking-wider">
+              {reviewMode ? 'Status' : 'Time Remaining'}
+            </div>
             <div className="font-mono text-xl sm:text-2xl font-bold leading-tight">
-              01:58:32
+              {reviewMode ? 'Exam Completed' : formatTime(timeLeft)}
             </div>
           </div>
         </div>
 
-        <Link
-          to="/dashboard"
-          className="text-xs sm:text-sm font-medium text-gray-500 hover:text-gray-800 underline sm:no-underline"
+        {/* Exit Exam Action */}
+        <button
+          type="button"
+          onClick={() => {
+            if (reviewMode) {
+              navigate('/dashboard')
+            } else {
+              setShowExitConfirmModal(true)
+            }
+          }}
+          className="text-xs sm:text-sm font-semibold text-gray-500 hover:text-red-700 transition-colors cursor-pointer underline sm:no-underline"
         >
-          Exit Exam
-        </Link>
+          {reviewMode ? '← Back to Dashboard' : 'Exit Exam'}
+        </button>
       </div>
 
       {/* Subject Tabs */}
@@ -505,20 +720,22 @@ export const Quiz: React.FC = () => {
           <div className="mt-8 pt-5 border-t border-gray-100 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <button
-                disabled={currentQuestionIndex === 0}
-                onClick={() => setCurrentQuestionIndex((i) => Math.max(0, i - 1))}
-                className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                disabled={isFirstQuestionOfSubject && isFirstSubject}
+                onClick={handlePrevQuestion}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
               >
-                ← Previous (P)
+                {isFirstQuestionOfSubject && !isFirstSubject
+                  ? `← Prev Subject (${subjects[currentSubjectIndex - 1]?.code || 'Prev'})`
+                  : '← Previous (P)'}
               </button>
               <button
-                disabled={currentQuestionIndex >= activeQuestions.length - 1}
-                onClick={() =>
-                  setCurrentQuestionIndex((i) => Math.min(activeQuestions.length - 1, i + 1))
-                }
-                className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                disabled={isLastQuestionOfSubject && isLastSubject}
+                onClick={handleNextQuestion}
+                className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
               >
-                Next (N) →
+                {isLastQuestionOfSubject && !isLastSubject
+                  ? `Next Subject (${subjects[currentSubjectIndex + 1]?.code || 'Next'}) →`
+                  : 'Next (N) →'}
               </button>
             </div>
 
@@ -538,16 +755,16 @@ export const Quiz: React.FC = () => {
 
               {!reviewMode ? (
                 <button
-                  onClick={handleFinalSubmit}
+                  onClick={() => setShowSubmitConfirmModal(true)}
                   disabled={submitting}
-                  className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 shadow-sm disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 shadow-sm disabled:opacity-50 cursor-pointer flex items-center gap-1.5 transition-colors"
                 >
                   {submitting ? 'Saving Results...' : 'Submit Exam (S)'}
                 </button>
               ) : (
                 <button
                   onClick={() => navigate('/dashboard')}
-                  className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 shadow-sm cursor-pointer"
+                  className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 shadow-sm cursor-pointer transition-colors"
                 >
                   Return to Dashboard
                 </button>
@@ -726,6 +943,107 @@ export const Quiz: React.FC = () => {
                 className="flex-1 py-3 px-4 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-xl text-sm font-semibold transition-colors cursor-pointer"
               >
                 Return to Dashboard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Exit Exam Confirmation Modal */}
+      {showExitConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 sm:p-7 shadow-2xl border border-gray-200 text-center animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-14 h-14 rounded-full bg-red-100 text-red-600 text-2xl flex items-center justify-center mx-auto mb-4">
+              ⚠️
+            </div>
+            <h3 className="text-xl font-extrabold text-gray-900">
+              Abandon & Exit Exam?
+            </h3>
+            <p className="text-sm text-gray-600 mt-2 leading-relaxed">
+              Are you sure you want to exit? Your examination timer is active, and any unsubmitted answers or progress in this session will be lost.
+            </p>
+
+            <div className="mt-6 flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={() => setShowExitConfirmModal(false)}
+                className="flex-1 py-2.5 px-4 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl text-sm font-semibold transition-colors cursor-pointer"
+              >
+                Continue Exam
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/dashboard')}
+                className="flex-1 py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-semibold transition-colors cursor-pointer shadow-xs"
+              >
+                Yes, Exit Exam
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Submit Exam Confirmation Modal */}
+      {showSubmitConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 sm:p-7 shadow-2xl border border-gray-200 text-center animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-14 h-14 rounded-full bg-emerald-100 text-emerald-600 text-2xl flex items-center justify-center mx-auto mb-4">
+              📋
+            </div>
+            <h3 className="text-xl font-extrabold text-gray-900">
+              Confirm Final Submission
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Please review your question completion summary before submitting.
+            </p>
+
+            <div className="my-5 p-4 bg-gray-50 rounded-xl border border-gray-200 text-left space-y-2 text-sm">
+              <div className="flex justify-between items-center text-gray-700">
+                <span>Total Questions:</span>
+                <span className="font-bold text-gray-900 font-mono">{totalQuestionsCount}</span>
+              </div>
+              <div className="flex justify-between items-center text-emerald-700">
+                <span>Answered:</span>
+                <span className="font-bold font-mono">{answeredQuestionsCount}</span>
+              </div>
+              <div className="flex justify-between items-center text-amber-700">
+                <span>Flagged for Review:</span>
+                <span className="font-bold font-mono">{flaggedQuestionsCount}</span>
+              </div>
+              <div className="flex justify-between items-center text-red-600">
+                <span>Unattempted:</span>
+                <span className="font-bold font-mono">
+                  {Math.max(0, totalQuestionsCount - answeredQuestionsCount)}
+                </span>
+              </div>
+              <div className="pt-2 border-t border-gray-200 flex justify-between items-center text-gray-700 font-medium">
+                <span>Time Remaining:</span>
+                <span className="font-mono font-bold text-emerald-800">{formatTime(timeLeft)}</span>
+              </div>
+            </div>
+
+            {totalQuestionsCount - answeredQuestionsCount > 0 && (
+              <div className="mb-5 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 text-left">
+                ⚠️ You still have <strong>{totalQuestionsCount - answeredQuestionsCount}</strong> unattempted question(s). Unattempted questions will be scored as 0.
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => setShowSubmitConfirmModal(false)}
+                className="flex-1 py-2.5 px-4 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-xl text-sm font-semibold transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Return to Exam
+              </button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={handleFinalSubmit}
+                className="flex-1 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold transition-colors cursor-pointer shadow-xs disabled:opacity-50 flex items-center justify-center gap-1.5"
+              >
+                {submitting ? 'Submitting...' : 'Yes, Submit Final (S)'}
               </button>
             </div>
           </div>
