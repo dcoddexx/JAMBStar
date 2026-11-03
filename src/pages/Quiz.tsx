@@ -14,6 +14,7 @@ export interface Question {
   correct_option: 'A' | 'B' | 'C' | 'D'
   explanation?: string | null
   exam_year?: number | null
+  image_url?: string | null
 }
 
 export interface Subject {
@@ -425,6 +426,15 @@ export const Quiz: React.FC = () => {
                   </span>
                 )}
               </div>
+
+              {/* Question Diagram / Image */}
+              {currentQ.image_url && currentQ.image_url.trim() !== '' && (
+                <img
+                  src={currentQ.image_url}
+                  alt={`Diagram for question ${currentQuestionIndex + 1}`}
+                  className="max-w-full h-auto max-h-64 object-contain mb-4 rounded-md"
+                />
+              )}
 
               {/* Question Text */}
               <div className="text-base sm:text-lg text-gray-900 leading-relaxed font-medium">

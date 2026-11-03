@@ -28,6 +28,7 @@ interface Question {
   correct_option: 'A' | 'B' | 'C' | 'D'
   explanation?: string | null
   exam_year?: number | null
+  image_url?: string | null
   created_at: string
 }
 
@@ -43,6 +44,7 @@ interface ParsedCSVQuestion {
   optionD: string
   correctOption: 'A' | 'B' | 'C' | 'D' | ''
   explanation: string
+  imageUrl: string | null
   isValid: boolean
   validationError?: string
 }
@@ -66,7 +68,8 @@ export const Admin: React.FC = () => {
   const [showAddQuestionModal, setShowAddQuestionModal] = useState<boolean>(false)
   const [questionActionMsg, setQuestionActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
-  // Single Question Form Fields
+  // Single Question Form Fields (Add & Edit)
+  const [editingQuestionId, setEditingQuestionId] = useState<string | null>(null)
   const [newSubjectId, setNewSubjectId] = useState<string>('')
   const [newQuestionText, setNewQuestionText] = useState<string>('')
   const [newOptionA, setNewOptionA] = useState<string>('')
@@ -76,6 +79,7 @@ export const Admin: React.FC = () => {
   const [newCorrectOption, setNewCorrectOption] = useState<'A' | 'B' | 'C' | 'D'>('A')
   const [newExplanation, setNewExplanation] = useState<string>('')
   const [newExamYear, setNewExamYear] = useState<string>('2024')
+  const [newImageUrl, setNewImageUrl] = useState<string>('')
   const [submittingQuestion, setSubmittingQuestion] = useState<boolean>(false)
 
   // Bulk CSV Upload State
@@ -178,8 +182,41 @@ export const Admin: React.FC = () => {
     }
   }
 
-  // Submit Single Question
-  const handleCreateQuestion = async (e: React.FormEvent) => {
+  // Open modal for Adding a new question
+  const handleOpenAddQuestionModal = () => {
+    setEditingQuestionId(null)
+    setNewQuestionText('')
+    setNewOptionA('')
+    setNewOptionB('')
+    setNewOptionC('')
+    setNewOptionD('')
+    setNewExplanation('')
+    setNewExamYear('2024')
+    setNewImageUrl('')
+    if (selectedSubjectId) {
+      setNewSubjectId(selectedSubjectId)
+    }
+    setShowAddQuestionModal(true)
+  }
+
+  // Open modal for Editing an existing question
+  const handleOpenEditQuestionModal = (q: Question) => {
+    setEditingQuestionId(q.id)
+    setNewSubjectId(q.subject_id)
+    setNewQuestionText(q.question_text)
+    setNewOptionA(q.option_a)
+    setNewOptionB(q.option_b)
+    setNewOptionC(q.option_c)
+    setNewOptionD(q.option_d)
+    setNewCorrectOption(q.correct_option)
+    setNewExplanation(q.explanation || '')
+    setNewExamYear(q.exam_year ? String(q.exam_year) : '')
+    setNewImageUrl(q.image_url || '')
+    setShowAddQuestionModal(true)
+  }
+
+  // Submit Single Question (Create or Update)
+  const handleSaveQuestion = async (e: React.FormEvent) => {
     e.preventDefault()
     setQuestionActionMsg(null)
 
@@ -190,36 +227,60 @@ export const Admin: React.FC = () => {
 
     setSubmittingQuestion(true)
     try {
-      const { data, error } = await supabase
-        .from('questions')
-        .insert({
-          subject_id: newSubjectId,
-          question_text: newQuestionText.trim(),
-          option_a: newOptionA.trim(),
-          option_b: newOptionB.trim(),
-          option_c: newOptionC.trim(),
-          option_d: newOptionD.trim(),
-          correct_option: newCorrectOption,
-          explanation: newExplanation.trim() || null,
-          exam_year: newExamYear ? parseInt(newExamYear, 10) : null,
-        })
-        .select()
-        .single()
-
-      if (error) throw error
-
-      if (data && data.subject_id === selectedSubjectId) {
-        setQuestions((prev) => [data, ...prev])
+      const questionPayload = {
+        subject_id: newSubjectId,
+        question_text: newQuestionText.trim(),
+        option_a: newOptionA.trim(),
+        option_b: newOptionB.trim(),
+        option_c: newOptionC.trim(),
+        option_d: newOptionD.trim(),
+        correct_option: newCorrectOption,
+        explanation: newExplanation.trim() || null,
+        exam_year: newExamYear ? parseInt(newExamYear, 10) : null,
+        image_url: newImageUrl.trim() || null,
       }
 
-      setQuestionActionMsg({ type: 'success', text: 'New question successfully added to question bank!' })
+      if (editingQuestionId) {
+        const { data, error } = await supabase
+          .from('questions')
+          .update(questionPayload)
+          .eq('id', editingQuestionId)
+          .select()
+          .single()
+
+        if (error) throw error
+
+        if (data) {
+          setQuestions((prev) =>
+            prev.map((q) => (q.id === editingQuestionId ? (data as Question) : q))
+          )
+        }
+        setQuestionActionMsg({ type: 'success', text: 'Question updated successfully!' })
+      } else {
+        const { data, error } = await supabase
+          .from('questions')
+          .insert(questionPayload)
+          .select()
+          .single()
+
+        if (error) throw error
+
+        if (data && data.subject_id === selectedSubjectId) {
+          setQuestions((prev) => [data as Question, ...prev])
+        }
+
+        setQuestionActionMsg({ type: 'success', text: 'New question successfully added to question bank!' })
+      }
+
       // Reset form
+      setEditingQuestionId(null)
       setNewQuestionText('')
       setNewOptionA('')
       setNewOptionB('')
       setNewOptionC('')
       setNewOptionD('')
       setNewExplanation('')
+      setNewImageUrl('')
       setShowAddQuestionModal(false)
     } catch (err: unknown) {
       const e = err as Error
@@ -335,8 +396,29 @@ export const Admin: React.FC = () => {
           return
         }
 
-        // Detect column indices based on header row
-        const header = rawRows[0].map((h) => h.toLowerCase().replace(/[^a-z0-9]/g, ''))
+        const headerRow = rawRows[0]
+        if (headerRow.length !== 9) {
+          setBulkError(
+            `Invalid CSV format: Expected exactly 9 columns, but found ${headerRow.length}. The 9 required columns are: Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Image URL.`
+          )
+          setParsedQuestions([])
+          setParsingCsv(false)
+          return
+        }
+
+        const ninthHeader = headerRow[8].trim()
+        const ninthHeaderClean = ninthHeader.toLowerCase().replace(/[^a-z0-9]/g, '')
+        if (ninthHeaderClean !== 'imageurl' && ninthHeaderClean !== 'image') {
+          setBulkError(
+            `Invalid 9th column header: Expected 'Image URL', but found '${ninthHeader}'.`
+          )
+          setParsedQuestions([])
+          setParsingCsv(false)
+          return
+        }
+
+        // Map column indices based on header row
+        const header = headerRow.map((h) => h.toLowerCase().replace(/[^a-z0-9]/g, ''))
 
         let subjIdx = header.findIndex((h) => h.includes('subj') || h.includes('course'))
         let qTextIdx = header.findIndex((h) => h.includes('quest') || h.includes('prompt'))
@@ -346,9 +428,9 @@ export const Admin: React.FC = () => {
         let optDIdx = header.findIndex((h) => h === 'optiond' || h === 'optd' || h === 'd')
         let corrIdx = header.findIndex((h) => h.includes('correct') || h.includes('ans'))
         let expIdx = header.findIndex((h) => h.includes('expl') || h.includes('solut'))
+        let imgIdx = header.findIndex((h) => h.includes('image') || h.includes('diagram') || h.includes('pic'))
 
-        // Fallback default index positions if headers are generic:
-        // (Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation)
+        // Fallback default index positions if headers are standard:
         if (subjIdx === -1) subjIdx = 0
         if (qTextIdx === -1) qTextIdx = 1
         if (optAIdx === -1) optAIdx = 2
@@ -357,13 +439,22 @@ export const Admin: React.FC = () => {
         if (optDIdx === -1) optDIdx = 5
         if (corrIdx === -1) corrIdx = 6
         if (expIdx === -1) expIdx = 7
+        if (imgIdx === -1) imgIdx = 8
 
         const parsed: ParsedCSVQuestion[] = []
 
         // Process data rows (skip header)
         for (let i = 1; i < rawRows.length; i++) {
           const row = rawRows[i]
-          if (row.length < 5) continue
+          if (row.length === 0 || (row.length === 1 && !row[0].trim())) continue
+
+          let isValid = true
+          let validationError = ''
+
+          if (row.length !== 9) {
+            isValid = false
+            validationError = `Expected exactly 9 columns, but row has ${row.length}.`
+          }
 
           const rawSubject = row[subjIdx] || ''
           const questionText = row[qTextIdx] || ''
@@ -373,24 +464,25 @@ export const Admin: React.FC = () => {
           const optionD = row[optDIdx] || ''
           const rawCorrect = (row[corrIdx] || '').toUpperCase().trim()
           const explanation = row[expIdx] || ''
+          const rawImageUrl = row[imgIdx] ? row[imgIdx].trim() : ''
+          const imageUrl = rawImageUrl !== '' ? rawImageUrl : null
 
           const matchedSubject = findSubjectMatch(rawSubject)
 
-          let isValid = true
-          let validationError = ''
-
-          if (!matchedSubject) {
-            isValid = false
-            validationError = `Unknown Subject "${rawSubject}". Could not map to subjects table.`
-          } else if (!questionText.trim()) {
-            isValid = false
-            validationError = 'Question text is empty.'
-          } else if (!optionA.trim() || !optionB.trim() || !optionC.trim() || !optionD.trim()) {
-            isValid = false
-            validationError = 'Options A, B, C, and D must all be non-empty.'
-          } else if (!['A', 'B', 'C', 'D'].includes(rawCorrect)) {
-            isValid = false
-            validationError = `Invalid correct option "${rawCorrect}". Must be A, B, C, or D.`
+          if (isValid) {
+            if (!matchedSubject) {
+              isValid = false
+              validationError = `Unknown Subject "${rawSubject}". Could not map to subjects table.`
+            } else if (!questionText.trim()) {
+              isValid = false
+              validationError = 'Question text is empty.'
+            } else if (!optionA.trim() || !optionB.trim() || !optionC.trim() || !optionD.trim()) {
+              isValid = false
+              validationError = 'Options A, B, C, and D must all be non-empty.'
+            } else if (!['A', 'B', 'C', 'D'].includes(rawCorrect)) {
+              isValid = false
+              validationError = `Invalid correct option "${rawCorrect}". Must be A, B, C, or D.`
+            }
           }
 
           parsed.push({
@@ -405,6 +497,7 @@ export const Admin: React.FC = () => {
             optionD,
             correctOption: (['A', 'B', 'C', 'D'].includes(rawCorrect) ? rawCorrect : '') as 'A' | 'B' | 'C' | 'D' | '',
             explanation,
+            imageUrl,
             isValid,
             validationError,
           })
@@ -442,6 +535,7 @@ export const Admin: React.FC = () => {
         option_d: q.optionD.trim(),
         correct_option: q.correctOption as 'A' | 'B' | 'C' | 'D',
         explanation: q.explanation.trim() || null,
+        image_url: q.imageUrl ? q.imageUrl.trim() || null : null,
       }))
 
       const { error: insertErr } = await supabase.from('questions').insert(rowsToInsert)
@@ -473,11 +567,11 @@ export const Admin: React.FC = () => {
   // Generate & Download sample CSV template
   const handleDownloadTemplate = () => {
     const sample =
-      'Subject,Question Text,Option A,Option B,Option C,Option D,Correct Option,Explanation\n' +
-      'Use of English,"Which word has the same vowel sound as ""feet""?",Beat,Bit,Bet,Bait,A,"The letters ee in feet represent the long /i:/ vowel sound, identical to ea in beat."\n' +
-      'Mathematics,"Solve for x: 3x - 7 = 14.",5,7,9,11,B,"Add 7: 3x = 21, then divide by 3: x = 7."\n' +
-      'Physics,"What is the SI unit of electrical resistance?",Watt,Volt,Ohm,Ampere,C,"Resistance is measured in Ohms (Ω)."\n' +
-      'Chemistry,"What is the chemical formula for ordinary table salt?",HCl,NaCl,NaOH,KCl,B,"Sodium chloride is NaCl."\n'
+      'Subject,Question Text,Option A,Option B,Option C,Option D,Correct Option,Explanation,Image URL\n' +
+      'Use of English,"Which word has the same vowel sound as ""feet""?",Beat,Bit,Bet,Bait,A,"The letters ee in feet represent the long /i:/ vowel sound, identical to ea in beat.",\n' +
+      'Mathematics,"Solve for x: 3x - 7 = 14.",5,7,9,11,B,"Add 7: 3x = 21, then divide by 3: x = 7.",\n' +
+      'Physics,"What is the SI unit of electrical resistance?",Watt,Volt,Ohm,Ampere,C,"Resistance is measured in Ohms (Ω).",https://images.unsplash.com/photo-1632571401005-458e9d244591\n' +
+      'Chemistry,"What is the chemical formula for ordinary table salt?",HCl,NaCl,NaOH,KCl,B,"Sodium chloride is NaCl.",\n'
 
     const blob = new Blob([sample], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
@@ -805,10 +899,7 @@ export const Admin: React.FC = () => {
 
               {/* Add Single Question Button */}
               <button
-                onClick={() => {
-                  setNewSubjectId(selectedSubjectId)
-                  setShowAddQuestionModal(true)
-                }}
+                onClick={handleOpenAddQuestionModal}
                 className="flex-1 sm:flex-none px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs sm:text-sm font-semibold shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-1.5"
               >
                 <span>＋</span>
@@ -856,9 +947,9 @@ export const Admin: React.FC = () => {
                 {/* File Upload & Template Download Action Bar */}
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-4 rounded-xl bg-slate-50 border border-slate-200">
                   <div>
-                    <div className="text-xs font-semibold text-slate-700">Required CSV Column Format:</div>
+                    <div className="text-xs font-semibold text-slate-700">Required CSV Column Format (9 Columns):</div>
                     <div className="text-[11px] font-mono text-slate-500 mt-0.5">
-                      Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation
+                      Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Image URL
                     </div>
                   </div>
                   <button
@@ -946,6 +1037,13 @@ export const Admin: React.FC = () => {
                             </div>
 
                             <p className="font-medium text-gray-900 line-clamp-2">{q.questionText}</p>
+
+                            {q.imageUrl && (
+                              <div className="text-[11px] text-emerald-700 flex items-center gap-1.5 font-medium">
+                                <span>🖼️ Diagram:</span>
+                                <span className="font-mono text-gray-600 truncate max-w-sm">{q.imageUrl}</span>
+                              </div>
+                            )}
 
                             <div className="text-[11px] text-gray-500 truncate">
                               A: {q.optionA} | B: {q.optionB} | C: {q.optionC} | D: {q.optionD}

@@ -60,11 +60,16 @@ CREATE TABLE IF NOT EXISTS public.questions (
     correct_option CHAR(1) NOT NULL CHECK (correct_option IN ('A', 'B', 'C', 'D')),
     explanation TEXT,
     exam_year INTEGER,
+    image_url TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Ensure image_url column exists if upgrading an existing schema
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS image_url TEXT;
+
 COMMENT ON TABLE public.questions IS 'Multiple choice questions with 4 options (A-D) and explanations.';
 COMMENT ON COLUMN public.questions.correct_option IS 'Correct answer choice (A, B, C, or D).';
+COMMENT ON COLUMN public.questions.image_url IS 'Optional URL or path to a diagram/figure for the question.';
 
 -- ------------------------------------------------------------------------------
 -- Table: quiz_results
