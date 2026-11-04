@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { AdBanner } from "../components/AdBanner";
+import { AnimatedExamTip } from "../components/AnimatedExamTip";
 
 type AuthMode = "signin" | "signup";
 type AcademicTrack = "Science" | "Arts" | "Commercial";
@@ -26,6 +27,7 @@ export const Landing: React.FC = () => {
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [track, setTrack] = useState<AcademicTrack>("Science");
+  const [gender, setGender] = useState<"male" | "female">("male");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -202,6 +204,7 @@ export const Landing: React.FC = () => {
             data: {
               full_name: fullName.trim() || "Student Candidate",
               track,
+              gender,
             },
           },
         });
@@ -318,81 +321,12 @@ export const Landing: React.FC = () => {
             </div>
           ) : currentUser ? (
             /* ================================================================= */
-            /* WELCOME BACK COMPONENT (Rendered for active Supabase sessions)    */
+            /* ANIMATED DAILY EXAM TIPS & FACTS WIDGET                           */
             /* ================================================================= */
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-xl p-6 sm:p-8 text-center relative overflow-hidden">
-              <div className="absolute top-0 inset-x-0 h-2 bg-gradient-to-r from-emerald-500 to-teal-500"></div>
-
-              {/* Avatar circle */}
-              <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-emerald-100 to-teal-50 border-2 border-emerald-500/20 text-emerald-700 font-black text-2xl flex items-center justify-center mx-auto mb-4 shadow-sm">
-                {(currentUser.full_name || currentUser.email || "U")
-                  .charAt(0)
-                  .toUpperCase()}
-              </div>
-
-              {/* Status pill */}
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 mb-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                Active Candidate Session
-              </div>
-
-              <h2 className="text-2xl font-extrabold text-gray-900 tracking-tight">
-                Welcome Back, {currentUser.full_name || "Candidate"}!
-              </h2>
-
-              <p className="text-xs sm:text-sm text-gray-500 mt-1 font-mono truncate max-w-xs mx-auto">
-                {currentUser.email}
-              </p>
-
-              {currentUser.track && (
-                <div className="mt-3 flex justify-center gap-2">
-                  <span className="text-xs px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 font-semibold border border-slate-200">
-                    Track: {currentUser.track}
-                  </span>
-                  {currentUser.role && currentUser.role !== "student" && (
-                    <span className="text-xs px-2.5 py-1 rounded-md bg-purple-100 text-purple-700 font-bold uppercase tracking-wider border border-purple-200">
-                      {currentUser.role}
-                    </span>
-                  )}
-                </div>
-              )}
-
-              <p className="text-xs sm:text-sm text-gray-600 mt-4 leading-relaxed">
-                You are currently signed in. Ready to continue your UTME CBT
-                mock drills and track your scores?
-              </p>
-
-              {/* Prominent CTA */}
-              <div className="mt-6 space-y-3">
-                <button
-                  type="button"
-                  onClick={() => navigate("/dashboard")}
-                  className="w-full py-3.5 px-6 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-base shadow-md hover:shadow-lg transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer group"
-                >
-                  <span>Continue to Dashboard</span>
-                  <span className="group-hover:translate-x-1 transition-transform">
-                    →
-                  </span>
-                </button>
-
-                <div className="flex items-center justify-center gap-4 pt-2 text-xs">
-                  <Link
-                    to="/quiz"
-                    className="text-emerald-600 hover:text-emerald-700 font-semibold underline"
-                  >
-                    Direct to CBT Exam
-                  </Link>
-                  <span className="text-gray-300">•</span>
-                  <button
-                    type="button"
-                    onClick={handleSignOut}
-                    className="text-red-500 hover:text-red-700 font-medium cursor-pointer"
-                  >
-                    Switch Account (Sign Out)
-                  </button>
-                </div>
-              </div>
-            </div>
+            <AnimatedExamTip
+              currentUser={currentUser}
+              onSignOut={handleSignOut}
+            />
           ) : (
             /* ================================================================= */
             /* LOGIN / REGISTRATION FORM CARD (Rendered when unauthenticated)    */
@@ -523,6 +457,26 @@ export const Landing: React.FC = () => {
                           </button>
                         ))}
                       </div>
+                    </div>
+
+                    {/* Compulsory Gender Dropdown */}
+                    <div>
+                      <label
+                        htmlFor="gender"
+                        className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1"
+                      >
+                        Gender *
+                      </label>
+                      <select
+                        id="gender"
+                        required
+                        value={gender}
+                        onChange={(e) => setGender(e.target.value as "male" | "female")}
+                        className="w-full px-3.5 py-2.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 bg-white font-medium text-gray-800 transition-colors"
+                      >
+                        <option value="male">Male</option>
+                        <option value="female">Female</option>
+                      </select>
                     </div>
                   </>
                 )}

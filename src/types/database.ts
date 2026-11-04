@@ -15,7 +15,13 @@ export interface Database {
           full_name: string | null
           avatar_url: string | null
           track: 'Science' | 'Arts' | 'Commercial'
+          gender: 'male' | 'female'
+          tier: 'free' | 'pro'
           role: 'student' | 'admin' | 'super_admin'
+          can_post_notices: boolean
+          can_manage_users: boolean
+          can_manage_questions: boolean
+          last_read_notices: string | null
           created_at: string
           updated_at: string
         }
@@ -24,7 +30,13 @@ export interface Database {
           full_name?: string | null
           avatar_url?: string | null
           track: 'Science' | 'Arts' | 'Commercial'
+          gender?: 'male' | 'female'
+          tier?: 'free' | 'pro'
           role?: 'student' | 'admin' | 'super_admin'
+          can_post_notices?: boolean
+          can_manage_users?: boolean
+          can_manage_questions?: boolean
+          last_read_notices?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -33,7 +45,13 @@ export interface Database {
           full_name?: string | null
           avatar_url?: string | null
           track?: 'Science' | 'Arts' | 'Commercial'
+          gender?: 'male' | 'female'
+          tier?: 'free' | 'pro'
           role?: 'student' | 'admin' | 'super_admin'
+          can_post_notices?: boolean
+          can_manage_users?: boolean
+          can_manage_questions?: boolean
+          last_read_notices?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -179,6 +197,7 @@ export interface Database {
           sender_id: string | null
           sender_name: string | null
           message: string
+          is_read: boolean
           created_at: string
         }
         Insert: {
@@ -187,6 +206,7 @@ export interface Database {
           sender_id?: string | null
           sender_name?: string | null
           message: string
+          is_read?: boolean
           created_at?: string
         }
         Update: {
@@ -195,7 +215,34 @@ export interface Database {
           sender_id?: string | null
           sender_name?: string | null
           message?: string
+          is_read?: boolean
           created_at?: string
+        }
+      }
+      notices: {
+        Row: {
+          id: string
+          title: string
+          content: string
+          created_by: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          title: string
+          content: string
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          title?: string
+          content?: string
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
         }
       }
     }

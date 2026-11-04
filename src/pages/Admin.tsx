@@ -6,7 +6,12 @@ export interface Profile {
   full_name: string | null
   avatar_url: string | null
   track: 'Science' | 'Arts' | 'Commercial'
+  gender?: 'male' | 'female' | null
   role: 'student' | 'admin' | 'super_admin'
+  can_post_notices?: boolean
+  can_manage_users?: boolean
+  can_manage_questions?: boolean
+  last_read_notices?: string | null
   created_at: string
 }
 
@@ -85,7 +90,16 @@ export interface AdminTicketMessage {
   created_at: string
 }
 
-type AdminTab = 'analytics' | 'questions' | 'support' | 'users' | 'settings'
+export interface Notice {
+  id: string
+  title: string
+  content: string
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+type AdminTab = 'analytics' | 'questions' | 'support' | 'notices' | 'users' | 'access' | 'settings'
 
 export const Admin: React.FC = () => {
   // Navigation & Authentication
@@ -95,6 +109,9 @@ export const Admin: React.FC = () => {
     email?: string
     full_name?: string | null
     role: 'student' | 'admin' | 'super_admin'
+    can_post_notices?: boolean
+    can_manage_users?: boolean
+    can_manage_questions?: boolean
   } | null>(null)
   const [loadingUser, setLoadingUser] = useState<boolean>(true)
 
@@ -166,6 +183,26 @@ export const Admin: React.FC = () => {
   const [updatingTicketStatus, setUpdatingTicketStatus] = useState<boolean>(false)
   const [supportActionMsg, setSupportActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
+  // Notice Board State (Admin & Super Admin)
+  const [notices, setNotices] = useState<Notice[]>([])
+  const [loadingNotices, setLoadingNotices] = useState<boolean>(false)
+  const [showNoticeModal, setShowNoticeModal] = useState<boolean>(false)
+  const [editingNotice, setEditingNotice] = useState<Notice | null>(null)
+  const [noticeTitle, setNoticeTitle] = useState<string>('')
+  const [noticeContent, setNoticeContent] = useState<string>('')
+  const [savingNotice, setSavingNotice] = useState<boolean>(false)
+  const [noticeError, setNoticeError] = useState<string | null>(null)
+  const [noticeSuccessMsg, setNoticeSuccessMsg] = useState<string | null>(null)
+  const [noticeToDelete, setNoticeToDelete] = useState<Notice | null>(null)
+  const [deletingNotice, setDeletingNotice] = useState<boolean>(false)
+
+  // Direct Messaging State (Admin to Candidate)
+  const [dmTargetUser, setDmTargetUser] = useState<Profile | null>(null)
+  const [dmSubject, setDmSubject] = useState<string>('')
+  const [dmMessage, setDmMessage] = useState<string>('')
+  const [sendingDm, setSendingDm] = useState<boolean>(false)
+  const [dmError, setDmError] = useState<string | null>(null)
+
   // Global CBT Settings State (Super Admin Only)
   const [cbtSettings, setCbtSettings] = useState<CBTSettings>(() => {
     try {
@@ -196,6 +233,9 @@ export const Admin: React.FC = () => {
     : null
   const isSuperAdmin = normalizedRole === 'superadmin'
   const isAdmin = normalizedRole === 'admin' || isSuperAdmin
+  const canPostNotices = isSuperAdmin || currentUser?.can_post_notices !== false
+  const canManageUsers = isSuperAdmin || currentUser?.can_manage_users !== false
+  const canManageQuestions = isSuperAdmin || currentUser?.can_manage_questions !== false
 
   // ---------------------------------------------------------------------------
   // Data Fetching
@@ -225,6 +265,9 @@ export const Admin: React.FC = () => {
           email: user.email,
           full_name: profile?.full_name || null,
           role,
+          can_post_notices: profile?.can_post_notices !== false,
+          can_manage_users: profile?.can_manage_users !== false,
+          can_manage_questions: profile?.can_manage_questions !== false,
         })
       }
     } catch (err) {
@@ -514,11 +557,228 @@ export const Admin: React.FC = () => {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Notice Board Handlers
+  // ---------------------------------------------------------------------------
+  const fetchNotices = async () => {
+    setLoadingNotices(true)
+    try {
+      const { data, error } = await supabase
+        .from('notices')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+      setNotices((data as Notice[]) || [])
+    } catch (err: unknown) {
+      console.error('Error fetching notices:', err)
+    } finally {
+      setLoadingNotices(false)
+    }
+  }
+
+  const handleOpenCreateNotice = () => {
+    setEditingNotice(null)
+    setNoticeTitle('')
+    setNoticeContent('')
+    setNoticeError(null)
+    setShowNoticeModal(true)
+  }
+
+  const handleOpenEditNotice = (n: Notice) => {
+    setEditingNotice(n)
+    setNoticeTitle(n.title)
+    setNoticeContent(n.content)
+    setNoticeError(null)
+    setShowNoticeModal(true)
+  }
+
+  const handleSaveNotice = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!noticeTitle.trim() || !noticeContent.trim()) {
+      setNoticeError('Please provide both an announcement title and message content.')
+      return
+    }
+
+    setSavingNotice(true)
+    setNoticeError(null)
+    try {
+      if (editingNotice) {
+        const { error } = await supabase
+          .from('notices')
+          .update({
+            title: noticeTitle.trim(),
+            content: noticeContent.trim(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', editingNotice.id)
+
+        if (error) throw error
+        setNoticeSuccessMsg('Announcement updated successfully.')
+      } else {
+        const { error } = await supabase
+          .from('notices')
+          .insert({
+            title: noticeTitle.trim(),
+            content: noticeContent.trim(),
+            created_by: currentUser?.id || null,
+          })
+
+        if (error) throw error
+        setNoticeSuccessMsg('Announcement published successfully.')
+      }
+
+      setShowNoticeModal(false)
+      fetchNotices()
+      setTimeout(() => setNoticeSuccessMsg(null), 3500)
+    } catch (err: unknown) {
+      const e = err as Error
+      setNoticeError(e.message || 'Failed to save announcement.')
+    } finally {
+      setSavingNotice(false)
+    }
+  }
+
+  const handleDeleteNotice = async () => {
+    if (!noticeToDelete) return
+    setDeletingNotice(true)
+    try {
+      const { error } = await supabase
+        .from('notices')
+        .delete()
+        .eq('id', noticeToDelete.id)
+
+      if (error) throw error
+      setNoticeToDelete(null)
+      setNoticeSuccessMsg('Announcement deleted successfully.')
+      fetchNotices()
+      setTimeout(() => setNoticeSuccessMsg(null), 3500)
+    } catch (err: unknown) {
+      console.error('Error deleting notice:', err)
+    } finally {
+      setDeletingNotice(false)
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Super Admin: Admin Access Permission Delegation Handlers
+  // ---------------------------------------------------------------------------
+  const handleToggleAdminPermission = async (
+    adminId: string,
+    permission: 'can_post_notices' | 'can_manage_users' | 'can_manage_questions',
+    currentVal: boolean
+  ) => {
+    if (!isSuperAdmin) {
+      setProfileActionMsg({ type: 'error', text: 'Unauthorized: Only Super Admins can update admin permissions.' })
+      return
+    }
+
+    const newVal = !currentVal
+    // Optimistic UI state update
+    setProfiles((prev) =>
+      prev.map((p) => (p.id === adminId ? { ...p, [permission]: newVal } : p))
+    )
+
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ [permission]: newVal })
+        .eq('id', adminId)
+
+      if (error) throw error
+
+      setProfileActionMsg({
+        type: 'success',
+        text: 'Admin permission updated successfully.',
+      })
+      setTimeout(() => setProfileActionMsg(null), 3000)
+    } catch (err: unknown) {
+      const e = err as Error
+      // Revert optimistic update
+      setProfiles((prev) =>
+        prev.map((p) => (p.id === adminId ? { ...p, [permission]: currentVal } : p))
+      )
+      setProfileActionMsg({ type: 'error', text: `Failed to update permission: ${e.message}` })
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Admin Direct Message Handlers
+  // ---------------------------------------------------------------------------
+  const handleOpenDirectMessage = (target: Profile) => {
+    setDmTargetUser(target)
+    setDmSubject(`Important Notification for ${target.full_name || 'Candidate'}`)
+    setDmMessage('')
+    setDmError(null)
+  }
+
+  const handleSendDirectMessage = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!dmTargetUser || !dmSubject.trim() || !dmMessage.trim()) return
+    if (!currentUser?.id) {
+      setDmError('Admin session not detected.')
+      return
+    }
+
+    const targetCandidateId = dmTargetUser.id
+    setSendingDm(true)
+    setDmError(null)
+    try {
+      // 1. Create support_tickets row explicitly owned by targetCandidateId, status: 'open'
+      const { data: ticket, error: ticketErr } = await supabase
+        .from('support_tickets')
+        .insert({
+          user_id: targetCandidateId,
+          guest_name: dmTargetUser.full_name || null,
+          subject: dmSubject.trim(),
+          category: 'Direct Message',
+          status: 'open',
+        })
+        .select()
+        .single()
+
+      if (ticketErr) throw ticketErr
+      if (!ticket) throw new Error('Could not create ticket')
+
+      // 2. Insert message into ticket_messages
+      const adminLabel =
+        currentUser.full_name || (isSuperAdmin ? 'Super Admin' : 'Admin Support')
+
+      const { error: msgErr } = await supabase
+        .from('ticket_messages')
+        .insert({
+          ticket_id: ticket.id,
+          sender_id: currentUser.id,
+          sender_name: adminLabel,
+          message: dmMessage.trim(),
+          is_read: false,
+        })
+
+      if (msgErr) throw msgErr
+
+      setProfileActionMsg({
+        type: 'success',
+        text: `Direct message successfully sent to ${dmTargetUser.full_name || 'candidate'}!`,
+      })
+      setDmTargetUser(null)
+      setDmSubject('')
+      setDmMessage('')
+      fetchSupportTickets()
+      setTimeout(() => setProfileActionMsg(null), 4000)
+    } catch (err: unknown) {
+      const e = err as Error
+      setDmError(e.message || 'Failed to send direct message.')
+    } finally {
+      setSendingDm(false)
+    }
+  }
+
   useEffect(() => {
     fetchCurrentUser()
     fetchProfiles()
     fetchSubjects()
     fetchSupportTickets()
+    fetchNotices()
   }, [])
 
   useEffect(() => {
@@ -1416,7 +1676,23 @@ export const Admin: React.FC = () => {
           </span>
         </button>
 
-        {/* Tab 4: User & Role Management (Super Admin Only) */}
+        {/* Tab: Notice Board (Admin & Super Admin) */}
+        <button
+          onClick={() => setActiveTab('notices')}
+          className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === 'notices'
+              ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
+              : 'border-transparent text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          <span>📢</span>
+          <span>Notice Board</span>
+          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 font-mono">
+            {notices.length}
+          </span>
+        </button>
+
+        {/* Tab 4: User Management (Admin & Super Admin) */}
         <button
           onClick={() => setActiveTab('users')}
           className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
@@ -1426,17 +1702,29 @@ export const Admin: React.FC = () => {
           }`}
         >
           <span>👥</span>
-          <span>User & Role Management</span>
-          {!isSuperAdmin ? (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-mono">
-              🔒 Super Admin
-            </span>
-          ) : (
-            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-bold">
-              {totalSystemUsers}
-            </span>
-          )}
+          <span>User Management</span>
+          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-bold font-mono">
+            {totalProfilesCount || profiles.length}
+          </span>
         </button>
+
+        {/* Tab 5: Admin Access (Super Admin Only) */}
+        {isSuperAdmin && (
+          <button
+            onClick={() => setActiveTab('access')}
+            className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+              activeTab === 'access'
+                ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
+                : 'border-transparent text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            <span>🛡️</span>
+            <span>Admin Access</span>
+            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 font-bold font-mono">
+              {profiles.filter((p) => p.role === 'admin').length}
+            </span>
+          </button>
+        )}
 
         {/* Tab 4: Global CBT Settings (Super Admin Only) */}
         <button
@@ -1731,27 +2019,31 @@ export const Admin: React.FC = () => {
               </button>
 
               {/* Bulk CSV Upload Button */}
-              <button
-                type="button"
-                onClick={() => {
-                  setBulkError(null)
-                  setShowBulkUploadModal(true)
-                }}
-                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer flex items-center gap-1.5"
-              >
-                <span>📂</span>
-                <span>Bulk CSV Upload</span>
-              </button>
+              {canManageQuestions && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBulkError(null)
+                    setShowBulkUploadModal(true)
+                  }}
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <span>📂</span>
+                  <span>Bulk CSV Upload</span>
+                </button>
+              )}
 
               {/* Add Single Question Button */}
-              <button
-                type="button"
-                onClick={handleOpenAddQuestionModal}
-                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer flex items-center gap-1.5"
-              >
-                <span>＋</span>
-                <span>Add Question</span>
-              </button>
+              {canManageQuestions && (
+                <button
+                  type="button"
+                  onClick={handleOpenAddQuestionModal}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <span>＋</span>
+                  <span>Add Question</span>
+                </button>
+              )}
 
               {/* Bulk Wipe Button (Super Admin Only) */}
               {isSuperAdmin && (
@@ -1834,20 +2126,22 @@ export const Admin: React.FC = () => {
                         <span className="text-[11px] text-gray-400 font-mono">ID: {q.id.slice(0, 8)}...</span>
                       </div>
 
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          onClick={() => handleOpenEditQuestionModal(q)}
-                          className="text-xs text-emerald-600 hover:text-emerald-700 font-semibold px-2 py-1 rounded hover:bg-emerald-50 border border-transparent hover:border-emerald-200 transition-colors cursor-pointer"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => handleDeleteQuestion(q.id)}
-                          className="text-xs text-red-600 hover:text-red-700 font-semibold px-2 py-1 rounded hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors cursor-pointer"
-                        >
-                          Delete
-                        </button>
-                      </div>
+                      {canManageQuestions && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => handleOpenEditQuestionModal(q)}
+                            className="text-xs text-emerald-600 hover:text-emerald-700 font-semibold px-2 py-1 rounded hover:bg-emerald-50 border border-transparent hover:border-emerald-200 transition-colors cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDeleteQuestion(q.id)}
+                            className="text-xs text-red-600 hover:text-red-700 font-semibold px-2 py-1 rounded hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors cursor-pointer"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {q.image_url && (
@@ -2331,42 +2625,157 @@ export const Admin: React.FC = () => {
       )}
 
       {/* ======================================================================= */}
-      {/* SECTION 4: USER & ROLE MANAGEMENT (Super Admin Only)                    */}
+      {/* SECTION: NOTICE BOARD MANAGER (Admin & Super Admin)                    */}
+      {/* ======================================================================= */}
+      {activeTab === 'notices' && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-xl border border-gray-200 shadow-2xs">
+            <div>
+              <h2 className="text-base sm:text-lg font-bold text-gray-900 flex items-center gap-2">
+                <span>📢</span>
+                <span>Global Notice Board</span>
+              </h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Broadcast announcements, system maintenance notes, and JAMB updates to candidate dashboards.
+              </p>
+            </div>
+            {canPostNotices ? (
+              <button
+                type="button"
+                onClick={handleOpenCreateNotice}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-xs cursor-pointer transition-colors"
+              >
+                <span>+</span>
+                <span>Post Announcement</span>
+              </button>
+            ) : (
+              <span className="text-[11px] font-bold px-3 py-1.5 rounded-lg bg-gray-100 text-gray-500 border border-gray-200">
+                🔒 Posting Restricted
+              </span>
+            )}
+          </div>
+
+          {noticeSuccessMsg && (
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold animate-in fade-in">
+              {noticeSuccessMsg}
+            </div>
+          )}
+
+          {loadingNotices ? (
+            <div className="bg-white p-12 text-center rounded-xl border border-gray-200">
+              <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+              <p className="mt-3 text-xs text-gray-500">Loading notices...</p>
+            </div>
+          ) : notices.length === 0 ? (
+            <div className="bg-white p-12 text-center rounded-xl border border-gray-200 space-y-3">
+              <span className="text-4xl">📢</span>
+              <h3 className="text-sm font-bold text-gray-900">No Announcements Posted Yet</h3>
+              <p className="text-xs text-gray-500 max-w-sm mx-auto">
+                Keep candidates informed by publishing examination dates, syllabus changes, or platform improvements.
+              </p>
+              {canPostNotices && (
+                <button
+                  type="button"
+                  onClick={handleOpenCreateNotice}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors"
+                >
+                  <span>+</span>
+                  <span>Post First Announcement</span>
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {notices.map((notice) => (
+                <div
+                  key={notice.id}
+                  className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs flex flex-col justify-between gap-4 hover:shadow-xs transition-shadow"
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-800 border border-emerald-200">
+                        <span>📢</span>
+                        <span>Announcement</span>
+                      </span>
+                      <span className="text-[11px] font-mono text-gray-400">
+                        {new Date(notice.created_at).toLocaleDateString('en-GB', {
+                          day: 'numeric',
+                          month: 'short',
+                          year: 'numeric',
+                        })}
+                      </span>
+                    </div>
+                    <h3 className="text-base font-bold text-gray-900 leading-snug">
+                      {notice.title}
+                    </h3>
+                    <p className="text-xs text-gray-600 whitespace-pre-line leading-relaxed">
+                      {notice.content}
+                    </p>
+                  </div>
+
+                  {canPostNotices && (
+                    <div className="flex items-center justify-end gap-2 pt-3 border-t border-gray-100">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditNotice(notice)}
+                        className="px-3 py-1 rounded-lg text-xs font-semibold text-gray-700 hover:text-emerald-700 hover:bg-gray-100 border border-gray-200 transition-colors cursor-pointer"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNoticeToDelete(notice)}
+                        className="px-3 py-1 rounded-lg text-xs font-semibold text-red-600 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* SECTION 4: USER & ROLE MANAGEMENT (Admin & Super Admin)                 */}
       {/* ======================================================================= */}
       {activeTab === 'users' && (
         <div className="space-y-4">
-          {!isSuperAdmin ? (
+          {!canManageUsers ? (
             <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 shadow-sm space-y-3">
               <span className="text-4xl">🔒</span>
               <h2 className="text-xl font-extrabold text-gray-900">
-                Super Admin Access Required
+                User Management Access Restricted
               </h2>
               <p className="text-sm text-gray-500 max-w-md mx-auto">
-                Candidate user management, role assignments, and account deletions are restricted exclusively to Super Admins.
+                You do not have administrative permission to manage student accounts. Contact the Super Admin to request access.
               </p>
             </div>
           ) : (
             <>
-              {profileActionMsg && (
-                <div
-                  className={`p-4 rounded-xl text-xs sm:text-sm flex items-center justify-between border ${
-                    profileActionMsg.type === 'success'
-                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                      : 'bg-red-50 text-red-800 border-red-200'
-                  }`}
-                >
-                  <span>{profileActionMsg.text}</span>
-                  <button
-                    onClick={() => setProfileActionMsg(null)}
-                    className="text-gray-400 hover:text-gray-600 text-sm font-bold"
-                  >
-                    ✕
-                  </button>
-                </div>
-              )}
+          {profileActionMsg && (
+            <div
+              className={`p-4 rounded-xl text-xs sm:text-sm flex items-center justify-between border ${
+                profileActionMsg.type === 'success'
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                  : 'bg-red-50 text-red-800 border-red-200'
+              }`}
+            >
+              <span>{profileActionMsg.text}</span>
+              <button
+                onClick={() => setProfileActionMsg(null)}
+                className="text-gray-400 hover:text-gray-600 text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+          )}
 
-              {/* Quick Admin Grant Box */}
-              <div className="bg-gradient-to-r from-emerald-50 to-teal-50 p-4 rounded-2xl border border-emerald-200 space-y-2">
+          {/* Quick Admin Grant Box (Super Admin Only) */}
+          {isSuperAdmin && (
+            <div className="bg-gradient-to-r from-emerald-50 to-teal-50 p-4 rounded-2xl border border-emerald-200 space-y-2">
                 <div className="flex items-center gap-2">
                   <span className="text-base">⚡</span>
                   <h3 className="text-xs sm:text-sm font-bold text-emerald-950">
@@ -2411,8 +2820,9 @@ export const Admin: React.FC = () => {
                   )}
                 </div>
               </div>
+            )}
 
-              {/* Search & Filters */}
+            {/* Search & Filters */}
               <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row gap-3 items-center justify-between">
                 <div className="w-full sm:w-72">
                   <input
@@ -2541,13 +2951,13 @@ export const Admin: React.FC = () => {
                                 </span>
                               </td>
 
-                              {/* Role Switcher Dropdown */}
+                              {/* Role Switcher */}
                               <td className="py-3.5 px-4">
                                 {isSelf ? (
                                   <span className="text-xs text-gray-400 italic font-mono">
                                     Super Admin (Locked)
                                   </span>
-                                ) : (
+                                ) : isSuperAdmin ? (
                                   <select
                                     value={p.role}
                                     onChange={(e) =>
@@ -2564,21 +2974,38 @@ export const Admin: React.FC = () => {
                                       <option value="super_admin">Super Admin</option>
                                     )}
                                   </select>
+                                ) : (
+                                  <span className="text-xs text-gray-500 font-medium capitalize">
+                                    {p.role}
+                                  </span>
                                 )}
                               </td>
 
-                              {/* Delete Account */}
+                              {/* Direct Message & Delete Account */}
                               <td className="py-3.5 px-4 text-right">
-                                {isSelf ? (
-                                  <span className="text-xs text-gray-400 italic">Self Account</span>
-                                ) : (
-                                  <button
-                                    onClick={() => setUserToDelete(p)}
-                                    className="px-2.5 py-1 text-xs font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 rounded-lg transition-colors cursor-pointer"
-                                  >
-                                    Delete Account
-                                  </button>
-                                )}
+                                <div className="flex items-center justify-end gap-2">
+                                  {!isSelf && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenDirectMessage(p)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors cursor-pointer"
+                                      title="Send Direct Message to Candidate"
+                                    >
+                                      <span>💬</span>
+                                      <span>Message</span>
+                                    </button>
+                                  )}
+                                  {isSelf ? (
+                                    <span className="text-xs text-gray-400 italic">Self Account</span>
+                                  ) : isSuperAdmin ? (
+                                    <button
+                                      onClick={() => setUserToDelete(p)}
+                                      className="px-2.5 py-1 text-xs font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 rounded-lg transition-colors cursor-pointer"
+                                    >
+                                      Delete Account
+                                    </button>
+                                  ) : null}
+                                </div>
                               </td>
                             </tr>
                           )
@@ -2589,6 +3016,184 @@ export const Admin: React.FC = () => {
                 </div>
               )}
             </>
+          )}
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* SECTION 5: ADMIN ACCESS PANEL (Super Admin Only)                        */}
+      {/* ======================================================================= */}
+      {activeTab === 'access' && (
+        <div className="space-y-4">
+          {!isSuperAdmin ? (
+            <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 shadow-sm space-y-3">
+              <span className="text-4xl">🔒</span>
+              <h2 className="text-xl font-extrabold text-gray-900">
+                Super Admin Access Required
+              </h2>
+              <p className="text-sm text-gray-500 max-w-md mx-auto">
+                Only Super Admins can manage administrative access rights and toggle permissions for other administrators.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                    <span>🛡️</span>
+                    <span>Admin Access Management</span>
+                  </h2>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Configure granular permissions for administrative staff. Toggle access for posting notices, managing student accounts, and curating question banks.
+                  </p>
+                </div>
+                <span className="text-xs font-mono font-bold px-3 py-1 rounded-full bg-purple-50 text-purple-700 border border-purple-200 self-start sm:self-auto">
+                  {profiles.filter((p) => p.role === 'admin').length} Active Admin(s)
+                </span>
+              </div>
+
+              {profileActionMsg && (
+                <div
+                  className={`p-4 rounded-xl text-xs sm:text-sm flex items-center justify-between border ${
+                    profileActionMsg.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : 'bg-red-50 text-red-800 border-red-200'
+                  }`}
+                >
+                  <span>{profileActionMsg.text}</span>
+                  <button
+                    onClick={() => setProfileActionMsg(null)}
+                    className="text-gray-400 hover:text-gray-600 text-sm font-bold"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {profiles.filter((p) => p.role === 'admin').length === 0 ? (
+                <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 space-y-3">
+                  <span className="text-4xl">👥</span>
+                  <h3 className="text-base font-bold text-gray-900">No Standard Admins Found</h3>
+                  <p className="text-xs text-gray-500 max-w-md mx-auto">
+                    Users elevated to 'admin' in the User Management tab will appear here for permission controls.
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs sm:text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[11px]">
+                        <tr>
+                          <th className="py-3.5 px-4">Admin Profile</th>
+                          <th className="py-3.5 px-4 text-center">Post Notices</th>
+                          <th className="py-3.5 px-4 text-center">Manage Users</th>
+                          <th className="py-3.5 px-4 text-center">Manage Questions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {profiles
+                          .filter((p) => p.role === 'admin')
+                          .map((adm) => {
+                            const canPost = adm.can_post_notices !== false
+                            const canUsers = adm.can_manage_users !== false
+                            const canQuestions = adm.can_manage_questions !== false
+
+                            return (
+                              <tr key={adm.id} className="hover:bg-gray-50/70 transition-colors">
+                                <td className="py-4 px-4">
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-9 h-9 rounded-full bg-purple-100 text-purple-700 font-bold flex items-center justify-center text-xs">
+                                      {(adm.full_name || 'A').charAt(0).toUpperCase()}
+                                    </div>
+                                    <div>
+                                      <div className="font-semibold text-gray-900">
+                                        {adm.full_name || 'Admin User'}
+                                      </div>
+                                      <div className="text-[11px] font-mono text-gray-400">
+                                        ID: {adm.id}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </td>
+
+                                {/* Toggle: Post Notices */}
+                                <td className="py-4 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleToggleAdminPermission(adm.id, 'can_post_notices', canPost)
+                                    }
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 ${
+                                      canPost ? 'bg-emerald-600' : 'bg-gray-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                        canPost ? 'translate-x-6' : 'translate-x-1'
+                                      }`}
+                                    />
+                                  </button>
+                                  <span className="block text-[10px] text-gray-500 mt-0.5">
+                                    {canPost ? 'Allowed' : 'Restricted'}
+                                  </span>
+                                </td>
+
+                                {/* Toggle: Manage Users */}
+                                <td className="py-4 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleToggleAdminPermission(adm.id, 'can_manage_users', canUsers)
+                                    }
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 ${
+                                      canUsers ? 'bg-emerald-600' : 'bg-gray-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                        canUsers ? 'translate-x-6' : 'translate-x-1'
+                                      }`}
+                                    />
+                                  </button>
+                                  <span className="block text-[10px] text-gray-500 mt-0.5">
+                                    {canUsers ? 'Allowed' : 'Restricted'}
+                                  </span>
+                                </td>
+
+                                {/* Toggle: Manage Questions */}
+                                <td className="py-4 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleToggleAdminPermission(
+                                        adm.id,
+                                        'can_manage_questions',
+                                        canQuestions
+                                      )
+                                    }
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 ${
+                                      canQuestions ? 'bg-emerald-600' : 'bg-gray-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                        canQuestions ? 'translate-x-6' : 'translate-x-1'
+                                      }`}
+                                    />
+                                  </button>
+                                  <span className="block text-[10px] text-gray-500 mt-0.5">
+                                    {canQuestions ? 'Allowed' : 'Restricted'}
+                                  </span>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -3215,6 +3820,207 @@ export const Admin: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* MODAL: DIRECT MESSAGE CANDIDATE                                         */}
+      {/* ======================================================================= */}
+      {dmTargetUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-2xl border border-gray-200 max-w-lg w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="p-5 bg-gradient-to-r from-emerald-600 to-teal-700 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-base flex items-center gap-2">
+                  <span>💬</span>
+                  <span>Send Direct Message</span>
+                </h3>
+                <p className="text-xs text-emerald-100 mt-0.5">
+                  To: <strong className="text-white">{dmTargetUser.full_name || 'Candidate'}</strong> ({dmTargetUser.track} Track)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDmTargetUser(null)}
+                className="w-8 h-8 rounded-full bg-black/10 hover:bg-black/20 text-white flex items-center justify-center cursor-pointer font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSendDirectMessage} className="p-5 space-y-4 overflow-y-auto flex-1">
+              {dmError && (
+                <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs">
+                  {dmError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Subject / Heading
+                </label>
+                <input
+                  type="text"
+                  value={dmSubject}
+                  onChange={(e) => setDmSubject(e.target.value)}
+                  placeholder="e.g. Important Update regarding your CBT performance"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Message Content
+                </label>
+                <textarea
+                  rows={4}
+                  value={dmMessage}
+                  onChange={(e) => setDmMessage(e.target.value)}
+                  placeholder="Type your message to the candidate here..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  required
+                />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  This message creates a ticket thread and triggers an unread notification badge on the candidate's dashboard.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setDmTargetUser(null)}
+                  className="px-4 py-2 rounded-lg text-xs font-semibold text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={sendingDm}
+                  className="px-5 py-2 rounded-lg text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs cursor-pointer transition-colors disabled:opacity-50"
+                >
+                  {sendingDm ? 'Sending...' : 'Send Message'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* MODAL: CREATE / EDIT NOTICE                                             */}
+      {/* ======================================================================= */}
+      {showNoticeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-2xl border border-gray-200 max-w-lg w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="p-5 bg-gradient-to-r from-emerald-600 to-teal-700 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-base flex items-center gap-2">
+                  <span>📢</span>
+                  <span>{editingNotice ? 'Edit Announcement' : 'Post New Announcement'}</span>
+                </h3>
+                <p className="text-xs text-emerald-100 mt-0.5">
+                  Broadcasted across all student and candidate dashboards
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowNoticeModal(false)}
+                className="w-8 h-8 rounded-full bg-black/10 hover:bg-black/20 text-white flex items-center justify-center cursor-pointer font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveNotice} className="p-5 space-y-4 overflow-y-auto flex-1">
+              {noticeError && (
+                <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs">
+                  {noticeError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Title
+                </label>
+                <input
+                  type="text"
+                  value={noticeTitle}
+                  onChange={(e) => setNoticeTitle(e.target.value)}
+                  placeholder="e.g. 2025 JAMB Registration Commences"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Announcement Details
+                </label>
+                <textarea
+                  rows={5}
+                  value={noticeContent}
+                  onChange={(e) => setNoticeContent(e.target.value)}
+                  placeholder="Write the full announcement text here..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  required
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setShowNoticeModal(false)}
+                  className="px-4 py-2 rounded-lg text-xs font-semibold text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingNotice}
+                  className="px-5 py-2 rounded-lg text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs cursor-pointer transition-colors disabled:opacity-50"
+                >
+                  {savingNotice ? 'Saving...' : editingNotice ? 'Update Announcement' : 'Publish Announcement'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* MODAL: DELETE NOTICE CONFIRMATION                                       */}
+      {/* ======================================================================= */}
+      {noticeToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-2xl border border-gray-200 max-w-sm w-full p-6 shadow-2xl space-y-4">
+            <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto text-2xl font-bold">
+              🗑️
+            </div>
+            <div className="text-center space-y-1">
+              <h3 className="text-base font-bold text-gray-900">Delete Announcement</h3>
+              <p className="text-xs text-gray-500">
+                Are you sure you want to delete <strong className="text-gray-800">"{noticeToDelete.title}"</strong>? This will remove it from all candidate feeds.
+              </p>
+            </div>
+            <div className="flex items-center justify-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setNoticeToDelete(null)}
+                className="px-4 py-2 rounded-lg text-xs font-semibold text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteNotice}
+                disabled={deletingNotice}
+                className="px-5 py-2 rounded-lg text-xs font-bold text-white bg-red-600 hover:bg-red-700 shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {deletingNotice ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}

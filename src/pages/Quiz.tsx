@@ -42,13 +42,27 @@ interface QuizSubmissionResult {
   errorMessage?: string | null
 }
 
+/**
+ * Fisher-Yates (Knuth) Array Shuffle Algorithm
+ * Produces an unbiased, uniform random permutation of array elements in O(n) time.
+ * Prevents candidates from memorizing question sequences across subsequent retakes.
+ */
+export function shuffleArray<T>(array: T[]): T[] {
+  const shuffled = [...array]
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
+  }
+  return shuffled
+}
+
 export const Quiz: React.FC = () => {
   const location = useLocation()
   const navigate = useNavigate()
 
   // Routing navigation state
   const stateData = location.state as
-    | { selectedSubjectIds?: string[]; selectedSubjects?: Subject[] }
+    | { selectedSubjectIds?: string[]; selectedSubjects?: Subject[]; durationMinutes?: number }
     | undefined
 
   const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search])
@@ -73,6 +87,12 @@ export const Quiz: React.FC = () => {
       const params = new URLSearchParams(window.location.search)
       if (params.get('demo') === 'true') {
         return 600 // 10 minutes demo timer
+      }
+      const st = (window.history.state?.usr || window.history.state) as
+        | { durationMinutes?: number }
+        | undefined
+      if (st?.durationMinutes && typeof st.durationMinutes === 'number' && st.durationMinutes > 0) {
+        return Math.round(st.durationMinutes * 60)
       }
       const stored = localStorage.getItem('jambstar_cbt_settings')
       if (stored) {
@@ -116,12 +136,20 @@ export const Quiz: React.FC = () => {
 
         if (isGuestOrDemo) {
           setTimeLeft(600)
+        } else if (stateData?.durationMinutes && typeof stateData.durationMinutes === 'number' && stateData.durationMinutes > 0) {
+          setTimeLeft(Math.round(stateData.durationMinutes * 60))
         }
 
         if (user) {
           setCandidateUser({ id: user.id, email: user.email })
         } else {
           setCandidateUser(null)
+        }
+
+        // Strict guard: Authenticated candidates MUST pass through the CBT Setup modal
+        if (!isGuestOrDemo && (!stateData?.selectedSubjects || stateData.selectedSubjects.length === 0)) {
+          navigate('/dashboard?setup=true', { replace: true })
+          return
         }
 
         let targetSubjects: Subject[] = []
@@ -161,15 +189,15 @@ export const Quiz: React.FC = () => {
         let finalQuestions: Question[] = questionsData || []
 
         if (isGuestOrDemo) {
-          // Limit total practice question queue to exactly 10 questions in demo mode
-          finalQuestions = finalQuestions.slice(0, 10)
+          // Thoroughly shuffle before taking 10 questions for demo mode
+          finalQuestions = shuffleArray(finalQuestions).slice(0, 10)
           const activeSubjIds = new Set(finalQuestions.map((q) => q.subject_id))
           targetSubjects = targetSubjects.filter((s) => activeSubjIds.has(s.id))
         }
 
         setSubjects(targetSubjects)
 
-        // Group questions by subject_id
+        // Group questions by subject_id and thoroughly randomize each subject with Fisher-Yates shuffle
         const grouped: Record<string, Question[]> = {}
         targetSubjects.forEach((s) => {
           grouped[s.id] = []
@@ -181,6 +209,13 @@ export const Quiz: React.FC = () => {
               grouped[q.subject_id] = []
             }
             grouped[q.subject_id].push(q)
+          })
+
+          // Thoroughly shuffle question sequence for each subject to prevent memorization
+          targetSubjects.forEach((s) => {
+            if (grouped[s.id] && grouped[s.id].length > 1) {
+              grouped[s.id] = shuffleArray(grouped[s.id])
+            }
           })
         }
 

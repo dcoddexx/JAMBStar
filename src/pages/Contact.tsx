@@ -140,7 +140,7 @@ export const Contact: React.FC = () => {
         </div>
         <div className="flex items-center gap-2 text-xs font-semibold text-emerald-700 bg-emerald-50/80 px-3.5 py-2 rounded-xl border border-emerald-200 shrink-0">
           <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-          <span>Support Desk Active (Mon – Sat)</span>
+          <span>Support Desk Active (Mon - Sat)</span>
         </div>
       </div>
 
@@ -357,7 +357,7 @@ export const Contact: React.FC = () => {
                 <span className="block font-semibold text-slate-100 uppercase tracking-wider text-[10px]">
                   Working Hours:
                 </span>
-                <span>Monday – Saturday: 8:00 AM – 6:00 PM (WAT)</span>
+                <span>Monday - Saturday: 8:00 AM - 6:00 PM (WAT)</span>
                 <span className="block text-slate-400 text-[11px] mt-0.5">
                   Sundays: Emergency Server & CBT Maintenance Only
                 </span>

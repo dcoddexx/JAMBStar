@@ -14,6 +14,7 @@ import Admin from "./pages/Admin";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import TermsOfService from "./pages/TermsOfService";
 import Contact from "./pages/Contact";
+import Settings from "./pages/Settings";
 import Navbar, { normalizeRole, isUserAdmin } from "./components/Navbar";
 
 export { normalizeRole, isUserAdmin };
@@ -234,6 +235,15 @@ const App: React.FC = () => {
               element={
                 <ProtectedRoute user={user} loading={authLoading} redirectTo="/?auth=signup">
                   <Dashboard />
+                </ProtectedRoute>
+              }
+            />
+            {/* Candidate Settings Route */}
+            <Route
+              path="/settings"
+              element={
+                <ProtectedRoute user={user} loading={authLoading} redirectTo="/?auth=signup">
+                  <Settings />
                 </ProtectedRoute>
               }
             />

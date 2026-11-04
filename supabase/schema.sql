@@ -19,14 +19,38 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     full_name TEXT,
     avatar_url TEXT,
     track TEXT NOT NULL CHECK (track IN ('Science', 'Arts', 'Commercial')),
+    gender TEXT NOT NULL DEFAULT 'male' CHECK (gender IN ('male', 'female')),
+    tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'pro')),
     role TEXT NOT NULL DEFAULT 'student' CHECK (role IN ('student', 'admin', 'super_admin')),
+    can_post_notices BOOLEAN NOT NULL DEFAULT true,
+    can_manage_users BOOLEAN NOT NULL DEFAULT true,
+    can_manage_questions BOOLEAN NOT NULL DEFAULT true,
+    last_read_notices TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Ensure gender, tier, admin permissions, and last_read_notices columns exist if upgrading an existing schema
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS gender TEXT CHECK (gender IN ('male', 'female'));
+UPDATE public.profiles SET gender = 'male' WHERE gender IS NULL;
+
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS tier TEXT DEFAULT 'free' CHECK (tier IN ('free', 'pro'));
+UPDATE public.profiles SET tier = 'free' WHERE tier IS NULL;
+
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_post_notices BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_users BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_questions BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_read_notices TIMESTAMPTZ;
+
 COMMENT ON TABLE public.profiles IS 'Student and admin profiles linked to auth.users.';
 COMMENT ON COLUMN public.profiles.track IS 'Student academic discipline: Science, Arts, or Commercial.';
+COMMENT ON COLUMN public.profiles.gender IS 'Candidate gender: male or female.';
+COMMENT ON COLUMN public.profiles.tier IS 'Candidate plan tier: free (standard JAMB mock) or pro (custom timer, 1-4 subjects, deep solutions).';
 COMMENT ON COLUMN public.profiles.role IS 'User permission role: student, admin, or super_admin.';
+COMMENT ON COLUMN public.profiles.can_post_notices IS 'Permission flag: whether admin can post/edit notices.';
+COMMENT ON COLUMN public.profiles.can_manage_users IS 'Permission flag: whether admin can manage users.';
+COMMENT ON COLUMN public.profiles.can_manage_questions IS 'Permission flag: whether admin can manage question bank.';
+COMMENT ON COLUMN public.profiles.last_read_notices IS 'Timestamp when user last viewed announcements feed.';
 
 -- ------------------------------------------------------------------------------
 -- Table: subjects
@@ -96,7 +120,7 @@ CREATE TABLE IF NOT EXISTS public.support_tickets (
     guest_name TEXT,
     guest_email TEXT,
     subject TEXT NOT NULL,
-    category TEXT NOT NULL CHECK (category IN ('Technical', 'Payment', 'Exam Inquiry', 'General', 'Question Bank Feedback', 'Candidate Support', 'Other')),
+    category TEXT NOT NULL CHECK (category IN ('Technical', 'Payment', 'Exam Inquiry', 'General', 'Question Bank Feedback', 'Candidate Support', 'Direct Message', 'Other')),
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
@@ -126,10 +150,31 @@ CREATE TABLE IF NOT EXISTS public.ticket_messages (
     sender_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
     sender_name TEXT,
     message TEXT NOT NULL,
+    is_read BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Ensure is_read column exists if upgrading an existing schema
+ALTER TABLE public.ticket_messages ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT false;
+UPDATE public.ticket_messages SET is_read = false WHERE is_read IS NULL;
+
 COMMENT ON TABLE public.ticket_messages IS 'Threaded messages and replies on support tickets.';
+COMMENT ON COLUMN public.ticket_messages.is_read IS 'True if message has been read by the recipient.';
+
+-- ------------------------------------------------------------------------------
+-- Table: notices
+-- Global announcements and updates posted by administrators
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.notices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+COMMENT ON TABLE public.notices IS 'Global platform notices and announcements posted by administrators.';
 
 -- ==============================================================================
 -- 3. INDEXES FOR PERFORMANCE
@@ -145,6 +190,9 @@ CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON public.support_tickets(
 CREATE INDEX IF NOT EXISTS idx_support_tickets_created_at ON public.support_tickets(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ticket_messages_ticket_id ON public.ticket_messages(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_ticket_messages_created_at ON public.ticket_messages(created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_ticket_messages_is_read ON public.ticket_messages(is_read);
+CREATE INDEX IF NOT EXISTS idx_ticket_messages_sender_id ON public.ticket_messages(sender_id);
+CREATE INDEX IF NOT EXISTS idx_notices_created_at ON public.notices(created_at DESC);
 
 -- ==============================================================================
 -- 4. HELPER FUNCTIONS FOR SECURITY & ROLE CHECKING
@@ -179,6 +227,7 @@ ALTER TABLE public.questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.quiz_results ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.support_tickets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ticket_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.notices ENABLE ROW LEVEL SECURITY;
 
 -- ------------------------------------------------------------------------------
 -- RLS: profiles
@@ -365,6 +414,61 @@ CREATE POLICY "Users and admins can insert ticket messages"
         )
     );
 
+DROP POLICY IF EXISTS "Users and admins can update ticket messages" ON public.ticket_messages;
+CREATE POLICY "Users and admins can update ticket messages"
+    ON public.ticket_messages
+    FOR UPDATE
+    TO authenticated
+    USING (
+        public.is_admin(auth.uid())
+        OR EXISTS (
+            SELECT 1 FROM public.support_tickets
+            WHERE id = ticket_messages.ticket_id
+              AND user_id = auth.uid()
+        )
+    )
+    WITH CHECK (
+        public.is_admin(auth.uid())
+        OR EXISTS (
+            SELECT 1 FROM public.support_tickets
+            WHERE id = ticket_messages.ticket_id
+              AND user_id = auth.uid()
+        )
+    );
+
+-- ------------------------------------------------------------------------------
+-- RLS: notices
+-- Authenticated users can view; Admins can insert, update, and delete
+-- ------------------------------------------------------------------------------
+DROP POLICY IF EXISTS "Authenticated users can view notices" ON public.notices;
+CREATE POLICY "Authenticated users can view notices"
+    ON public.notices
+    FOR SELECT
+    TO authenticated
+    USING (true);
+
+DROP POLICY IF EXISTS "Admins can insert notices" ON public.notices;
+CREATE POLICY "Admins can insert notices"
+    ON public.notices
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "Admins can update notices" ON public.notices;
+CREATE POLICY "Admins can update notices"
+    ON public.notices
+    FOR UPDATE
+    TO authenticated
+    USING (public.is_admin(auth.uid()))
+    WITH CHECK (public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "Admins can delete notices" ON public.notices;
+CREATE POLICY "Admins can delete notices"
+    ON public.notices
+    FOR DELETE
+    TO authenticated
+    USING (public.is_admin(auth.uid()));
+
 -- ==============================================================================
 -- 6. AUTOMATED PROFILE CREATION ON SIGNUP
 -- ==============================================================================
@@ -372,12 +476,14 @@ CREATE POLICY "Users and admins can insert ticket messages"
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO public.profiles (id, full_name, avatar_url, track, role)
+    INSERT INTO public.profiles (id, full_name, avatar_url, track, gender, tier, role)
     VALUES (
         new.id,
         COALESCE(new.raw_user_meta_data->>'full_name', 'Student Candidate'),
         new.raw_user_meta_data->>'avatar_url',
         COALESCE(new.raw_user_meta_data->>'track', 'Science'),
+        COALESCE(new.raw_user_meta_data->>'gender', 'male'),
+        COALESCE(new.raw_user_meta_data->>'tier', 'free'),
         COALESCE(new.raw_user_meta_data->>'role', 'student')
     );
     RETURN new;
@@ -409,3 +515,39 @@ VALUES
     ('Agricultural Science', 'AGR', 'Crop production, soil science, forestry, and animal husbandry.', '🌱', false),
     ('Christian Religious Knowledge', 'CRK', 'Old Testament, New Testament, and Christian ethics.', '🕊️', false)
 ON CONFLICT (name) DO NOTHING;
+
+-- ==============================================================================
+-- 8. STORAGE BUCKET: avatars
+-- Public bucket for candidate and staff profile pictures
+-- ==============================================================================
+
+-- Create avatars storage bucket if it doesn't already exist
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('avatars', 'avatars', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Storage Policies for avatars bucket
+DROP POLICY IF EXISTS "Public avatars can be viewed by anyone" ON storage.objects;
+CREATE POLICY "Public avatars can be viewed by anyone"
+ON storage.objects FOR SELECT
+TO public
+USING (bucket_id = 'avatars');
+
+DROP POLICY IF EXISTS "Authenticated users can upload avatars" ON storage.objects;
+CREATE POLICY "Authenticated users can upload avatars"
+ON storage.objects FOR INSERT
+TO authenticated
+WITH CHECK (bucket_id = 'avatars');
+
+DROP POLICY IF EXISTS "Users can update their own avatars" ON storage.objects;
+CREATE POLICY "Users can update their own avatars"
+ON storage.objects FOR UPDATE
+TO authenticated
+USING (bucket_id = 'avatars');
+
+DROP POLICY IF EXISTS "Users can delete their own avatars" ON storage.objects;
+CREATE POLICY "Users can delete their own avatars"
+ON storage.objects FOR DELETE
+TO authenticated
+USING (bucket_id = 'avatars');
+

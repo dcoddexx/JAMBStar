@@ -41,7 +41,7 @@ export const TermsOfService: React.FC = () => {
             These Terms of Service ("Terms") govern your access to and use of the <strong>JAMBStar</strong> platform, website, CBT practice engines, question banks, and analytical tools (collectively, the "Platform"), operated by <strong>JAMBStar Educational Technologies</strong> ("we," "our," or "us").
           </p>
           <p>
-            By accessing or using the Platform—whether as a registered candidate or an unauthenticated guest user—you agree to be bound by these Terms and our Privacy Policy. If you do not agree to all terms and conditions, you must immediately cease accessing or using JAMBStar.
+            By accessing or using the Platform: whether as a registered candidate or an unauthenticated guest user: you agree to be bound by these Terms and our Privacy Policy. If you do not agree to all terms and conditions, you must immediately cease accessing or using JAMBStar.
           </p>
         </section>
 
