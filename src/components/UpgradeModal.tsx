@@ -26,7 +26,7 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
   // Paystack configuration
   const paystackPublicKey =
     import.meta.env.VITE_PAYSTACK_PUBLIC_KEY ||
-    'pk_test_683c46d002972fe525a128fba1350ca2a4cf7ddf'
+    'pk_live_171d4fc8da421692b293f1b2502a324dc76a61d7'
 
   const paystackConfig = {
     reference: `JAMBSTAR_PRO_${user?.id ? user.id.slice(0, 8) : 'GUEST'}_${Date.now()}`,
@@ -117,14 +117,9 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
       const e = err as Error
       console.warn('Paystack inline initialization note:', e)
       setErrorMessage(
-        'Could not initialize Paystack popup. You can use the Sandbox Test Payment option below.'
+        'Could not initialize Paystack popup. Please check your internet connection or try again.'
       )
     }
-  }
-
-  // Fallback simulator for developer / sandbox testing
-  const handleSimulatePayment = async () => {
-    await handlePaymentSuccess({ reference: `SIMULATED_${Date.now()}` })
   }
 
   if (!isOpen) return null
@@ -225,14 +220,14 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
 
               <div className="flex items-start gap-3 p-2.5 rounded-xl bg-slate-50 border border-slate-100">
                 <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 text-base font-bold">
-                  📅
+                  📚
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-slate-900">
-                    Year Filtering & Past Exam Catalog
+                    Topic-by-Topic Practice Drills
                   </h4>
                   <p className="text-[11px] text-slate-600">
-                    Filter questions by specific UTME exam years (2015 - 2024) to track examiner question patterns.
+                    Master High-Yield Syllabus Topics with targeted topic drills, custom question counts, and focused practice.
                   </p>
                 </div>
               </div>
@@ -288,15 +283,12 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
               )}
             </button>
 
-            {/* Test Simulation Button for sandbox testing */}
-            <button
-              type="button"
-              onClick={handleSimulatePayment}
-              disabled={isProcessing}
-              className="w-full py-2 px-4 rounded-lg text-xs font-semibold text-slate-600 hover:text-emerald-700 hover:bg-slate-100 transition-colors cursor-pointer"
-            >
-              ⚡ Instant Sandbox Activation (Dev / Testing)
-            </button>
+            {/* Instant Activation Notice */}
+            <div className="py-1 text-center">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
+                🔒 Instant Automatic Pro Activation
+              </span>
+            </div>
 
             {/* Back / Dismiss Button */}
             <button

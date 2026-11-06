@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     can_post_notices BOOLEAN NOT NULL DEFAULT true,
     can_manage_users BOOLEAN NOT NULL DEFAULT true,
     can_manage_questions BOOLEAN NOT NULL DEFAULT true,
+    can_manage_pro BOOLEAN NOT NULL DEFAULT false,
     last_read_notices TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
@@ -40,6 +41,7 @@ UPDATE public.profiles SET tier = 'free' WHERE tier IS NULL;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_post_notices BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_users BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_questions BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_pro BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_read_notices TIMESTAMPTZ;
 
 COMMENT ON TABLE public.profiles IS 'Student and admin profiles linked to auth.users.';
@@ -70,12 +72,46 @@ COMMENT ON TABLE public.subjects IS 'Catalog of subjects tested in the JAMB UTME
 COMMENT ON COLUMN public.subjects.is_compulsory IS 'True if compulsory for all candidates (e.g. Use of English).';
 
 -- ------------------------------------------------------------------------------
+-- Table: topics
+-- Syllabus topics belonging to specific UTME subjects
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.topics (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    subject_id UUID NOT NULL REFERENCES public.subjects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    code VARCHAR(30),
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    CONSTRAINT uq_subject_topic_name UNIQUE (subject_id, name)
+);
+
+COMMENT ON TABLE public.topics IS 'Syllabus topics belonging to specific UTME subjects.';
+COMMENT ON COLUMN public.topics.name IS 'Clean topic title (e.g., Organic Chemistry, Mechanics, Oral Forms).';
+
+-- ------------------------------------------------------------------------------
+-- Table: subtopics (Optional granular depth)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.subtopics (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    topic_id UUID NOT NULL REFERENCES public.topics(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    CONSTRAINT uq_topic_subtopic_name UNIQUE (topic_id, name)
+);
+
+COMMENT ON TABLE public.subtopics IS 'Granular subtopics categorized under a parent syllabus topic.';
+
+-- ------------------------------------------------------------------------------
 -- Table: questions
 -- Past and practice questions mapped to subjects with A-D options
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.questions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subject_id UUID NOT NULL REFERENCES public.subjects(id) ON DELETE CASCADE,
+    topic_id UUID REFERENCES public.topics(id) ON DELETE SET NULL,
+    subtopic_id UUID REFERENCES public.subtopics(id) ON DELETE SET NULL,
     question_text TEXT NOT NULL,
     option_a TEXT NOT NULL,
     option_b TEXT NOT NULL,
@@ -85,15 +121,21 @@ CREATE TABLE IF NOT EXISTS public.questions (
     explanation TEXT,
     exam_year INTEGER,
     image_url TEXT,
+    difficulty_level TEXT CHECK (difficulty_level IN ('easy', 'medium', 'hard')) DEFAULT 'medium',
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
--- Ensure image_url column exists if upgrading an existing schema
+-- Ensure image_url, topic_id, and difficulty_level columns exist if upgrading an existing schema
 ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS image_url TEXT;
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS topic_id UUID REFERENCES public.topics(id) ON DELETE SET NULL;
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS subtopic_id UUID REFERENCES public.subtopics(id) ON DELETE SET NULL;
+ALTER TABLE public.questions ADD COLUMN IF NOT EXISTS difficulty_level TEXT CHECK (difficulty_level IN ('easy', 'medium', 'hard')) DEFAULT 'medium';
 
 COMMENT ON TABLE public.questions IS 'Multiple choice questions with 4 options (A-D) and explanations.';
 COMMENT ON COLUMN public.questions.correct_option IS 'Correct answer choice (A, B, C, or D).';
 COMMENT ON COLUMN public.questions.image_url IS 'Optional URL or path to a diagram/figure for the question.';
+COMMENT ON COLUMN public.questions.topic_id IS 'Foreign key linking the question to its primary syllabus topic.';
+COMMENT ON COLUMN public.questions.difficulty_level IS 'Calculated or assigned question difficulty rating.';
 
 -- ------------------------------------------------------------------------------
 -- Table: quiz_results
@@ -181,7 +223,13 @@ COMMENT ON TABLE public.notices IS 'Global platform notices and announcements po
 -- ==============================================================================
 
 CREATE INDEX IF NOT EXISTS idx_profiles_role ON public.profiles(role);
+CREATE INDEX IF NOT EXISTS idx_subjects_name ON public.subjects(name);
+CREATE INDEX IF NOT EXISTS idx_topics_subject_id ON public.topics(subject_id);
+CREATE INDEX IF NOT EXISTS idx_topics_name ON public.topics(name);
 CREATE INDEX IF NOT EXISTS idx_questions_subject_id ON public.questions(subject_id);
+CREATE INDEX IF NOT EXISTS idx_questions_topic_id ON public.questions(topic_id);
+CREATE INDEX IF NOT EXISTS idx_questions_exam_year ON public.questions(exam_year);
+CREATE INDEX IF NOT EXISTS idx_questions_subject_topic ON public.questions(subject_id, topic_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_results_user_id ON public.quiz_results(user_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_results_subject_id ON public.quiz_results(subject_id);
 CREATE INDEX IF NOT EXISTS idx_quiz_results_timestamp ON public.quiz_results(timestamp DESC);
@@ -215,6 +263,43 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public;
 
 COMMENT ON FUNCTION public.is_admin(UUID) IS 'Returns true if the specified user (or auth.uid()) has an admin or super_admin role. Runs as SECURITY DEFINER to bypass RLS recursion on public.profiles.';
+
+-- Helper Function: Get or Create Topic by Subject and Name
+CREATE OR REPLACE FUNCTION public.get_or_create_topic(
+    p_subject_id UUID,
+    p_topic_name TEXT
+)
+RETURNS UUID AS $$
+DECLARE
+    v_topic_id UUID;
+    v_clean_name TEXT;
+BEGIN
+    v_clean_name := trim(p_topic_name);
+    IF v_clean_name IS NULL OR v_clean_name = '' THEN
+        RETURN NULL;
+    END IF;
+
+    -- Check if topic already exists for this subject (case-insensitive)
+    SELECT id INTO v_topic_id
+    FROM public.topics
+    WHERE subject_id = p_subject_id
+      AND LOWER(name) = LOWER(v_clean_name)
+    LIMIT 1;
+
+    -- If not found, insert new topic
+    IF v_topic_id IS NULL THEN
+        INSERT INTO public.topics (subject_id, name)
+        VALUES (p_subject_id, v_clean_name)
+        ON CONFLICT (subject_id, name) DO UPDATE
+            SET updated_at = timezone('utc'::text, now())
+        RETURNING id INTO v_topic_id;
+    END IF;
+
+    RETURN v_topic_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMENT ON FUNCTION public.get_or_create_topic(UUID, TEXT) IS 'Returns existing topic_id or inserts a new topic on-the-fly for a given subject.';
 
 -- ==============================================================================
 -- 5. ROW LEVEL SECURITY (RLS) POLICIES
@@ -302,6 +387,47 @@ CREATE POLICY "Allow admins to delete subjects"
     FOR DELETE
     TO authenticated
     USING (public.is_admin(auth.uid()));
+
+-- ------------------------------------------------------------------------------
+-- RLS: topics
+-- Public read access; strictly admin & super_admin for INSERT, UPDATE, DELETE
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.topics ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public read access to topics" ON public.topics;
+CREATE POLICY "Allow public read access to topics"
+    ON public.topics
+    FOR SELECT
+    TO authenticated, anon
+    USING (true);
+
+DROP POLICY IF EXISTS "Allow admins to manage topics" ON public.topics;
+CREATE POLICY "Allow admins to manage topics"
+    ON public.topics
+    FOR ALL
+    TO authenticated
+    USING (public.is_admin(auth.uid()))
+    WITH CHECK (public.is_admin(auth.uid()));
+
+-- ------------------------------------------------------------------------------
+-- RLS: subtopics
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.subtopics ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public read access to subtopics" ON public.subtopics;
+CREATE POLICY "Allow public read access to subtopics"
+    ON public.subtopics
+    FOR SELECT
+    TO authenticated, anon
+    USING (true);
+
+DROP POLICY IF EXISTS "Allow admins to manage subtopics" ON public.subtopics;
+CREATE POLICY "Allow admins to manage subtopics"
+    ON public.subtopics
+    FOR ALL
+    TO authenticated
+    USING (public.is_admin(auth.uid()))
+    WITH CHECK (public.is_admin(auth.uid()));
 
 -- ------------------------------------------------------------------------------
 -- RLS: questions

@@ -113,6 +113,8 @@ export const Dashboard: React.FC = () => {
 
   // CBT Pre-Exam Setup Modal State
   const [showPreExamModal, setShowPreExamModal] = useState<boolean>(false)
+  const [preExamInitialMode, setPreExamInitialMode] = useState<'mock' | 'drill'>('mock')
+  const [paystackAlert, setPaystackAlert] = useState<string | null>(null)
 
   // Notice Board State & Unread Badge Tracking
   const [notices, setNotices] = useState<Notice[]>([])
@@ -678,14 +680,51 @@ export const Dashboard: React.FC = () => {
     }
   }
 
+  // Check for Paystack payment return query parameters
+  useEffect(() => {
+    const ref = searchParams.get('reference') || searchParams.get('trxref')
+    if (ref && currentUser?.id) {
+      const verifyAndUpgrade = async () => {
+        try {
+          const { error } = await supabase
+            .from('profiles')
+            .update({ tier: 'pro', updated_at: new Date().toISOString() })
+            .eq('id', currentUser.id)
+
+          if (!error) {
+            setUserTier('pro')
+            setPaystackAlert('🎉 Congratulations! Your payment was verified and JAMBStar Pro lifetime access has been unlocked.')
+            setTimeout(() => setPaystackAlert(null), 8000)
+            const newParams = new URLSearchParams(searchParams)
+            newParams.delete('reference')
+            newParams.delete('trxref')
+            setSearchParams(newParams, { replace: true })
+          }
+        } catch (err) {
+          console.error('Error verifying redirect transaction:', err)
+        }
+      }
+      verifyAndUpgrade()
+    }
+  }, [searchParams, currentUser?.id])
+
   // CBT Pre-Exam Launch Handlers
   const handleOpenPreExamSetup = () => {
+    setPreExamInitialMode('mock')
     setShowPreExamModal(true)
   }
 
   const handleLaunchExamFromSetup = (
     chosenSubjectIds: string[],
-    durationMinutes: number
+    durationMinutes: number,
+    drillConfig?: {
+      isTopicDrill: boolean
+      subjectId: string
+      topicIds: string[]
+      topicNames: string[]
+      questionCount: number
+      isUntimed: boolean
+    }
   ) => {
     const chosenSubjects = subjects.filter((s) => chosenSubjectIds.includes(s.id))
     setShowPreExamModal(false)
@@ -694,6 +733,12 @@ export const Dashboard: React.FC = () => {
         selectedSubjectIds: chosenSubjectIds,
         selectedSubjects: chosenSubjects,
         durationMinutes,
+        isTopicDrill: drillConfig?.isTopicDrill || false,
+        drillSubject: drillConfig ? subjects.find((s) => s.id === drillConfig.subjectId) : undefined,
+        drillTopicIds: drillConfig?.topicIds || [],
+        drillTopicNames: drillConfig?.topicNames || [],
+        questionCount: drillConfig?.questionCount || 40,
+        isUntimed: drillConfig?.isUntimed || false,
       },
     })
   }
@@ -730,11 +775,26 @@ export const Dashboard: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            onClick={() => {
+              setPreExamInitialMode('drill')
+              setShowPreExamModal(true)
+            }}
+            disabled={loading}
+            className={`inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-xs ${
+              !loading
+                ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 hover:shadow-md cursor-pointer'
+                : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+            }`}
+          >
+            <span>🎯</span>
+            <span>Topic Practice Drill</span>
+          </button>
           <button
             onClick={handleOpenPreExamSetup}
             disabled={loading}
-            className={`inline-flex items-center justify-center px-5 py-2.5 rounded-xl text-sm font-bold transition-all shadow-sm ${
+            className={`inline-flex items-center justify-center px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-sm ${
               !loading
                 ? 'bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-md cursor-pointer'
                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
@@ -744,6 +804,23 @@ export const Dashboard: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Paystack Upgrade Alert */}
+      {paystackAlert && (
+        <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm font-bold flex items-center justify-between shadow-xs animate-in fade-in">
+          <div className="flex items-center gap-2.5">
+            <span className="text-xl">🎉</span>
+            <span>{paystackAlert}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setPaystackAlert(null)}
+            className="text-emerald-700 hover:text-emerald-900 font-bold p-1 cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Dashboard Navigation Tabs */}
       <div className="flex border-b border-gray-200 gap-2">
@@ -1171,17 +1248,34 @@ export const Dashboard: React.FC = () => {
           >
             ← Return to Landing
           </Link>
-          <button
-            onClick={handleOpenPreExamSetup}
-            disabled={loading}
-            className={`w-full sm:w-auto px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${
-              !loading
-                ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm cursor-pointer'
-                : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-            }`}
-          >
-            Configure & Launch CBT Exam →
-          </button>
+          <div className="flex flex-col sm:flex-row items-center gap-2.5 w-full sm:w-auto">
+            <button
+              onClick={() => {
+                setPreExamInitialMode('drill')
+                setShowPreExamModal(true)
+              }}
+              disabled={loading}
+              className={`w-full sm:w-auto px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-1.5 ${
+                !loading
+                  ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 shadow-sm cursor-pointer'
+                  : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+              }`}
+            >
+              <span>🎯</span>
+              <span>Topic Practice Drill</span>
+            </button>
+            <button
+              onClick={handleOpenPreExamSetup}
+              disabled={loading}
+              className={`w-full sm:w-auto px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${
+                !loading
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm cursor-pointer'
+                  : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+              }`}
+            >
+              Configure & Launch CBT Exam →
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1678,6 +1772,7 @@ export const Dashboard: React.FC = () => {
         onOpenUpgradeModal={() => setShowUpgradeModal(true)}
         onLaunchExam={handleLaunchExamFromSetup}
         initialSelectedSubjectIds={selectedSubjects}
+        initialMode={preExamInitialMode}
       />
 
       {/* JAMBStar Pro Paystack Upgrade Modal */}

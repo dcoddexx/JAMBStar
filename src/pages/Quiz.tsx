@@ -62,8 +62,22 @@ export const Quiz: React.FC = () => {
 
   // Routing navigation state
   const stateData = location.state as
-    | { selectedSubjectIds?: string[]; selectedSubjects?: Subject[]; durationMinutes?: number }
+    | {
+        selectedSubjectIds?: string[]
+        selectedSubjects?: Subject[]
+        durationMinutes?: number
+        isTopicDrill?: boolean
+        drillSubject?: Subject
+        drillTopicIds?: string[]
+        drillTopicNames?: string[]
+        questionCount?: number
+        isUntimed?: boolean
+      }
     | undefined
+
+  const isTopicDrill = Boolean(stateData?.isTopicDrill)
+  const isUntimed = Boolean(stateData?.isUntimed)
+  const [elapsedTime, setElapsedTime] = useState<number>(0)
 
   const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search])
   const [isDemoMode, setIsDemoMode] = useState<boolean>(() => {
@@ -89,8 +103,11 @@ export const Quiz: React.FC = () => {
         return 600 // 10 minutes demo timer
       }
       const st = (window.history.state?.usr || window.history.state) as
-        | { durationMinutes?: number }
+        | { durationMinutes?: number; isUntimed?: boolean }
         | undefined
+      if (st?.isUntimed) {
+        return 0
+      }
       if (st?.durationMinutes && typeof st.durationMinutes === 'number' && st.durationMinutes > 0) {
         return Math.round(st.durationMinutes * 60)
       }
@@ -155,8 +172,10 @@ export const Quiz: React.FC = () => {
         let targetSubjects: Subject[] = []
         let targetSubjectIds: string[] = []
 
-        // If subjects were passed via React Router location state from Dashboard
-        if (stateData?.selectedSubjects && stateData.selectedSubjects.length > 0 && !isGuestOrDemo) {
+        if (isTopicDrill && stateData?.drillSubject) {
+          targetSubjects = [stateData.drillSubject]
+          targetSubjectIds = [stateData.drillSubject.id]
+        } else if (stateData?.selectedSubjects && stateData.selectedSubjects.length > 0 && !isGuestOrDemo) {
           targetSubjects = stateData.selectedSubjects
           targetSubjectIds = stateData.selectedSubjectIds || targetSubjects.map((s) => s.id)
         } else {
@@ -178,17 +197,37 @@ export const Quiz: React.FC = () => {
         }
 
         // Fetch live questions from Supabase for the candidate's selected subjects
-        const { data: questionsData, error: qErr } = await supabase
+        let qQuery = supabase
           .from('questions')
           .select('*')
           .in('subject_id', targetSubjectIds)
-          .order('created_at', { ascending: true })
+
+        if (isTopicDrill && stateData?.drillTopicIds && stateData.drillTopicIds.length > 0) {
+          qQuery = qQuery.in('topic_id', stateData.drillTopicIds)
+        }
+
+        const { data: questionsData, error: qErr } = await qQuery.order('created_at', { ascending: true })
 
         if (qErr) throw qErr
 
         let finalQuestions: Question[] = questionsData || []
 
-        if (isGuestOrDemo) {
+        // If topic drill returned no questions for specific topic filter, fallback to all questions of this subject
+        if (isTopicDrill && finalQuestions.length === 0) {
+          const { data: fallbackQuestions } = await supabase
+            .from('questions')
+            .select('*')
+            .in('subject_id', targetSubjectIds)
+            .limit(stateData?.questionCount || 20)
+          if (fallbackQuestions && fallbackQuestions.length > 0) {
+            finalQuestions = fallbackQuestions
+          }
+        }
+
+        if (isTopicDrill) {
+          const count = stateData?.questionCount || 20
+          finalQuestions = shuffleArray(finalQuestions).slice(0, count)
+        } else if (isGuestOrDemo) {
           // Thoroughly shuffle before taking 10 questions for demo mode
           finalQuestions = shuffleArray(finalQuestions).slice(0, 10)
           const activeSubjIds = new Set(finalQuestions.map((q) => q.subject_id))
@@ -444,11 +483,20 @@ export const Quiz: React.FC = () => {
     }
   }, [subjects, questionsBySubject, selectedAnswers])
 
-  // Countdown Timer Effect: decrements timeLeft every second when exam is active
+  // Timer / Stopwatch Effect
   useEffect(() => {
-    // Freeze countdown if loading, already submitted, in review mode, or demo complete modal open
+    // Freeze timer if loading, already submitted, in review mode, or demo complete modal open
     if (loading || reviewMode || submissionResult !== null || showDemoCompleteModal) return
 
+    // Untimed study mode: count up elapsed seconds
+    if (isUntimed) {
+      const timer = setInterval(() => {
+        setElapsedTime((prev) => prev + 1)
+      }, 1000)
+      return () => clearInterval(timer)
+    }
+
+    // Timed mode: countdown
     if (timeLeft <= 0) {
       if (isDemoMode) {
         setShowDemoCompleteModal(true)
@@ -472,7 +520,7 @@ export const Quiz: React.FC = () => {
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [loading, reviewMode, submissionResult, timeLeft, submitting, handleFinalSubmit, isDemoMode, showDemoCompleteModal])
+  }, [loading, reviewMode, submissionResult, timeLeft, submitting, handleFinalSubmit, isDemoMode, showDemoCompleteModal, isUntimed])
 
   // Global Keydown Event Listener for JAMB 8-Key Shortcuts
   useEffect(() => {
@@ -644,8 +692,15 @@ export const Quiz: React.FC = () => {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs uppercase tracking-wider font-semibold text-gray-500">
-                JAMB UTME CBT Simulator
+                {isTopicDrill ? '🎯 Topic Practice Drill' : 'JAMB UTME CBT Simulator'}
               </span>
+              {isTopicDrill && (
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-300">
+                  {stateData?.drillTopicNames && stateData.drillTopicNames.length > 0
+                    ? stateData.drillTopicNames.join(', ')
+                    : 'High-Yield Drill'}
+                </span>
+              )}
               {isDemoMode && (
                 <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
@@ -656,7 +711,7 @@ export const Quiz: React.FC = () => {
             <div className="text-sm sm:text-base font-bold text-gray-900">
               Candidate:{' '}
               <span className="font-mono text-emerald-700">
-                {candidateUser?.email || (isDemoMode ? 'Guest Demo Candidate' : 'Guest Candidate')}
+                {candidateUser?.email || (isDemoMode ? 'Guest Demo Candidate' : 'Candidate')}
               </span>
             </div>
           </div>
@@ -667,6 +722,8 @@ export const Quiz: React.FC = () => {
           className={`flex items-center gap-3 px-4 py-2 rounded-lg border transition-colors ${
             reviewMode
               ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : isUntimed
+              ? 'bg-teal-50 border-teal-200 text-teal-800'
               : timeLeft < 300
               ? 'bg-red-100 border-red-300 text-red-800 animate-pulse'
               : timeLeft < 900
@@ -674,13 +731,13 @@ export const Quiz: React.FC = () => {
               : 'bg-red-50 border-red-200 text-red-700'
           }`}
         >
-          <span className="text-lg">{reviewMode ? '✓' : '⏱️'}</span>
+          <span className="text-lg">{reviewMode ? '✓' : isUntimed ? '🧘' : '⏱️'}</span>
           <div>
             <div className="text-[10px] font-bold uppercase tracking-wider">
-              {reviewMode ? 'Status' : 'Time Remaining'}
+              {reviewMode ? 'Status' : isUntimed ? 'Elapsed Time (Untimed)' : 'Time Remaining'}
             </div>
             <div className="font-mono text-xl sm:text-2xl font-bold leading-tight">
-              {reviewMode ? 'Exam Completed' : formatTime(timeLeft)}
+              {reviewMode ? 'Exam Completed' : isUntimed ? formatTime(elapsedTime) : formatTime(timeLeft)}
             </div>
           </div>
         </div>

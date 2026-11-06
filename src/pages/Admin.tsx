@@ -4,13 +4,16 @@ import { supabase } from '../lib/supabase'
 export interface Profile {
   id: string
   full_name: string | null
+  email?: string | null
   avatar_url: string | null
   track: 'Science' | 'Arts' | 'Commercial'
   gender?: 'male' | 'female' | null
   role: 'student' | 'admin' | 'super_admin'
+  tier?: 'free' | 'pro'
   can_post_notices?: boolean
   can_manage_users?: boolean
   can_manage_questions?: boolean
+  can_manage_pro?: boolean
   last_read_notices?: string | null
   created_at: string
 }
@@ -24,9 +27,21 @@ export interface Subject {
   is_compulsory?: boolean
 }
 
+export interface Topic {
+  id: string
+  subject_id: string
+  name: string
+  code?: string | null
+  description?: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface Question {
   id: string
   subject_id: string
+  topic_id?: string | null
+  subtopic_id?: string | null
   question_text: string
   option_a: string
   option_b: string
@@ -35,8 +50,10 @@ export interface Question {
   correct_option: 'A' | 'B' | 'C' | 'D'
   explanation?: string | null
   exam_year?: number | null
+  difficulty_level?: 'easy' | 'medium' | 'hard' | null
   image_url?: string | null
   created_at: string
+  topic?: { id: string; name: string } | null
 }
 
 export interface CBTSettings {
@@ -51,6 +68,9 @@ export interface ParsedCSVQuestion {
   rawSubject: string
   subjectId: string | null
   subjectName: string
+  rawTopic: string
+  topicName: string
+  topicId: string | null
   questionText: string
   optionA: string
   optionB: string
@@ -58,6 +78,7 @@ export interface ParsedCSVQuestion {
   optionD: string
   correctOption: 'A' | 'B' | 'C' | 'D' | ''
   explanation: string
+  examYear: number | null
   imageUrl: string | null
   isValid: boolean
   validationError?: string
@@ -109,9 +130,11 @@ export const Admin: React.FC = () => {
     email?: string
     full_name?: string | null
     role: 'student' | 'admin' | 'super_admin'
+    tier?: 'free' | 'pro'
     can_post_notices?: boolean
     can_manage_users?: boolean
     can_manage_questions?: boolean
+    can_manage_pro?: boolean
   } | null>(null)
   const [loadingUser, setLoadingUser] = useState<boolean>(true)
 
@@ -123,6 +146,7 @@ export const Admin: React.FC = () => {
   const [trackFilter, setTrackFilter] = useState<string>('All')
   const [roleFilter, setRoleFilter] = useState<string>('All')
   const [quickGrantSearch, setQuickGrantSearch] = useState<string>('')
+  const [proGrantSearch, setProGrantSearch] = useState<string>('')
   const [profileActionMsg, setProfileActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [userToDelete, setUserToDelete] = useState<Profile | null>(null)
   const [deletingUser, setDeletingUser] = useState<boolean>(false)
@@ -131,6 +155,8 @@ export const Admin: React.FC = () => {
   const [subjects, setSubjects] = useState<Subject[]>([])
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>('')
   const [questions, setQuestions] = useState<Question[]>([])
+  const [topics, setTopics] = useState<Topic[]>([])
+  const [topicMap, setTopicMap] = useState<Record<string, string>>({})
   const [subjectQuestionCounts, setSubjectQuestionCounts] = useState<Record<string, number>>({})
   const [totalQuestionsCount, setTotalQuestionsCount] = useState<number>(0)
   const [loadingSubjectCounts, setLoadingSubjectCounts] = useState<boolean>(false)
@@ -150,6 +176,7 @@ export const Admin: React.FC = () => {
   // Single Question Form Fields (Add & Edit)
   const [editingQuestionId, setEditingQuestionId] = useState<string | null>(null)
   const [newSubjectId, setNewSubjectId] = useState<string>('')
+  const [newTopicName, setNewTopicName] = useState<string>('')
   const [newQuestionText, setNewQuestionText] = useState<string>('')
   const [newOptionA, setNewOptionA] = useState<string>('')
   const [newOptionB, setNewOptionB] = useState<string>('')
@@ -236,6 +263,7 @@ export const Admin: React.FC = () => {
   const canPostNotices = isSuperAdmin || currentUser?.can_post_notices !== false
   const canManageUsers = isSuperAdmin || currentUser?.can_manage_users !== false
   const canManageQuestions = isSuperAdmin || currentUser?.can_manage_questions !== false
+  const canManagePro = isSuperAdmin || currentUser?.can_manage_pro === true
 
   // ---------------------------------------------------------------------------
   // Data Fetching
@@ -265,9 +293,11 @@ export const Admin: React.FC = () => {
           email: user.email,
           full_name: profile?.full_name || null,
           role,
+          tier: profile?.tier || 'free',
           can_post_notices: profile?.can_post_notices !== false,
           can_manage_users: profile?.can_manage_users !== false,
           can_manage_questions: profile?.can_manage_questions !== false,
+          can_manage_pro: profile?.can_manage_pro === true,
         })
       }
     } catch (err) {
@@ -366,6 +396,35 @@ export const Admin: React.FC = () => {
     } catch (err: unknown) {
       const e = err as Error
       console.error('Error fetching subjects:', e)
+    }
+  }
+
+  // Load Topics and build topic lookup map
+  const fetchTopics = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('topics')
+        .select('*')
+        .order('name', { ascending: true })
+
+      if (error) {
+        if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
+          return
+        }
+        console.warn('Error fetching topics:', error.message)
+        return
+      }
+
+      if (data) {
+        setTopics(data as Topic[])
+        const map: Record<string, string> = {}
+        data.forEach((t) => {
+          map[t.id] = t.name
+        })
+        setTopicMap(map)
+      }
+    } catch {
+      // Gracefully handle if table does not exist
     }
   }
 
@@ -665,7 +724,7 @@ export const Admin: React.FC = () => {
   // ---------------------------------------------------------------------------
   const handleToggleAdminPermission = async (
     adminId: string,
-    permission: 'can_post_notices' | 'can_manage_users' | 'can_manage_questions',
+    permission: 'can_post_notices' | 'can_manage_users' | 'can_manage_questions' | 'can_manage_pro',
     currentVal: boolean
   ) => {
     if (!isSuperAdmin) {
@@ -777,6 +836,7 @@ export const Admin: React.FC = () => {
     fetchCurrentUser()
     fetchProfiles()
     fetchSubjects()
+    fetchTopics()
     fetchSupportTickets()
     fetchNotices()
   }, [])
@@ -814,16 +874,66 @@ export const Admin: React.FC = () => {
 
       if (error) throw error
 
+      const targetUser = profiles.find((p) => p.id === userId)
+      const userName = targetUser?.full_name || `User (${userId.slice(0, 8)}...)`
+      const roleLabel = newRole === 'super_admin' ? 'Super Admin' : newRole === 'admin' ? 'Admin' : 'Student'
+
       setProfiles((prev) =>
         prev.map((p) => (p.id === userId ? { ...p, role: newRole } : p))
       )
-      setProfileActionMsg({ type: 'success', text: `User role successfully updated to "${newRole}".` })
+      setProfileActionMsg({ type: 'success', text: `Role for "${userName}" successfully updated to ${roleLabel}.` })
 
       // Automatically re-fetch profiles from database to sync exact metric counts & state
       await fetchProfiles()
     } catch (err: unknown) {
       const e = err as Error
       setProfileActionMsg({ type: 'error', text: `Failed to update role: ${e.message}` })
+    }
+  }
+
+  // Super Admin & Authorized Staff: Manual Pro Tier Switcher (Bypass Payment)
+  const handleToggleUserTier = async (userId: string, targetTier: 'free' | 'pro') => {
+    if (!canManagePro) {
+      setProfileActionMsg({ type: 'error', text: 'Unauthorized: You do not have permission to manage JAMBStar Pro tier access.' })
+      return
+    }
+
+    const targetUser = profiles.find((p) => p.id === userId)
+    const userName = targetUser?.full_name || `User (${userId.slice(0, 8)}...)`
+
+    // Optimistic UI state update
+    setProfiles((prev) =>
+      prev.map((p) => (p.id === userId ? { ...p, tier: targetTier } : p))
+    )
+
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ tier: targetTier })
+        .eq('id', userId)
+
+      if (error) throw error
+
+      if (targetTier === 'pro') {
+        setProfileActionMsg({
+          type: 'success',
+          text: `⭐ JAMBStar Pro Access manually granted to "${userName}". Payment successfully bypassed.`,
+        })
+      } else {
+        setProfileActionMsg({
+          type: 'success',
+          text: `JAMBStar Pro Access revoked for "${userName}". Account returned to Free tier.`,
+        })
+      }
+
+      await fetchProfiles()
+    } catch (err: unknown) {
+      const e = err as Error
+      // Revert optimistic update
+      setProfiles((prev) =>
+        prev.map((p) => (p.id === userId ? { ...p, tier: targetUser?.tier || 'free' } : p))
+      )
+      setProfileActionMsg({ type: 'error', text: `Failed to update Pro tier: ${e.message}` })
     }
   }
 
@@ -919,6 +1029,7 @@ export const Admin: React.FC = () => {
 
   const handleOpenAddQuestionModal = () => {
     setEditingQuestionId(null)
+    setNewTopicName('')
     setNewQuestionText('')
     setNewOptionA('')
     setNewOptionB('')
@@ -936,6 +1047,7 @@ export const Admin: React.FC = () => {
   const handleOpenEditQuestionModal = (q: Question) => {
     setEditingQuestionId(q.id)
     setNewSubjectId(q.subject_id)
+    setNewTopicName(q.topic?.name || (q.topic_id ? topicMap[q.topic_id] : '') || '')
     setNewQuestionText(q.question_text)
     setNewOptionA(q.option_a)
     setNewOptionB(q.option_b)
@@ -959,8 +1071,35 @@ export const Admin: React.FC = () => {
 
     setSubmittingQuestion(true)
     try {
+      let resolvedTopicId: string | null = null
+      if (newTopicName.trim()) {
+        const cleanTopic = newTopicName.trim()
+        const existingTopic = topics.find(
+          (t) => t.subject_id === newSubjectId && t.name.toLowerCase() === cleanTopic.toLowerCase()
+        )
+        if (existingTopic) {
+          resolvedTopicId = existingTopic.id
+        } else {
+          try {
+            const { data: newTop } = await supabase
+              .from('topics')
+              .insert({ subject_id: newSubjectId, name: cleanTopic })
+              .select('id, subject_id, name')
+              .single()
+            if (newTop) {
+              resolvedTopicId = newTop.id
+              setTopics((prev) => [...prev, newTop as Topic])
+              setTopicMap((prev) => ({ ...prev, [newTop.id]: newTop.name }))
+            }
+          } catch {
+            // graceful fallback if topics table not created yet
+          }
+        }
+      }
+
       const questionPayload = {
         subject_id: newSubjectId,
+        topic_id: resolvedTopicId,
         question_text: newQuestionText.trim(),
         option_a: newOptionA.trim(),
         option_b: newOptionB.trim(),
@@ -1007,6 +1146,7 @@ export const Admin: React.FC = () => {
 
       // Reset form
       setEditingQuestionId(null)
+      setNewTopicName('')
       setNewQuestionText('')
       setNewOptionA('')
       setNewOptionB('')
@@ -1044,13 +1184,14 @@ export const Admin: React.FC = () => {
   }
 
   // ---------------------------------------------------------------------------
-  // CSV Export Engine (9 Columns)
+  // CSV Export Engine (11 Columns with Topic & Exam Year)
   // ---------------------------------------------------------------------------
   const handleExportCSV = () => {
     const subjName = activeSubject?.name || 'Subject'
 
     const headers = [
       'Subject',
+      'Topic',
       'Question Text',
       'Option A',
       'Option B',
@@ -1058,6 +1199,7 @@ export const Admin: React.FC = () => {
       'Option D',
       'Correct Option',
       'Explanation',
+      'Exam Year',
       'Image URL',
     ]
 
@@ -1070,17 +1212,22 @@ export const Admin: React.FC = () => {
       return str
     }
 
-    const rows = questions.map((q) => [
-      escapeCSV(subjName),
-      escapeCSV(q.question_text),
-      escapeCSV(q.option_a),
-      escapeCSV(q.option_b),
-      escapeCSV(q.option_c),
-      escapeCSV(q.option_d),
-      escapeCSV(q.correct_option),
-      escapeCSV(q.explanation || ''),
-      escapeCSV(q.image_url || ''),
-    ])
+    const rows = questions.map((q) => {
+      const topicName = q.topic?.name || (q.topic_id ? topicMap[q.topic_id] : '') || ''
+      return [
+        escapeCSV(subjName),
+        escapeCSV(topicName),
+        escapeCSV(q.question_text),
+        escapeCSV(q.option_a),
+        escapeCSV(q.option_b),
+        escapeCSV(q.option_c),
+        escapeCSV(q.option_d),
+        escapeCSV(q.correct_option),
+        escapeCSV(q.explanation || ''),
+        escapeCSV(q.exam_year || ''),
+        escapeCSV(q.image_url || ''),
+      ]
+    })
 
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\r\n')
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
@@ -1253,9 +1400,13 @@ export const Admin: React.FC = () => {
         }
 
         const headerRow = rawRows[0]
-        if (headerRow.length !== 9) {
+        const colCount = headerRow.length
+        const is11Col = colCount >= 11 || (colCount >= 10 && headerRow.some((h) => h.toLowerCase().includes('topic')))
+        const is9Col = !is11Col && (colCount === 9 || colCount === 10)
+
+        if (!is11Col && !is9Col) {
           setBulkError(
-            `Expected exactly 9 columns in CSV header, but found ${headerRow.length}. Ensure headers are: Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Image URL.`
+            `Expected 11 columns in CSV header (Subject, Topic, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Exam Year, Image URL), but found ${colCount}.`
           )
           setParsedQuestions([])
           setParsingCsv(false)
@@ -1269,23 +1420,56 @@ export const Admin: React.FC = () => {
           // Clean Empty Rows: skip rows that are completely empty
           if (r.length === 0 || r.every((c) => c.trim() === '')) continue
 
-          // Pad row to ensure 9 columns so out-of-bounds access never returns undefined
-          while (r.length < 9) {
+          // Pad row to ensure minimum columns
+          const requiredCols = is11Col ? 11 : 9
+          while (r.length < requiredCols) {
             r.push('')
           }
 
           const rowNum = i + 1
-          // Trim Whitespace: trim all fields and normalize correct option to uppercase
-          const rawSubject = (r[0] || '').trim()
-          const questionText = (r[1] || '').trim()
-          const optionA = (r[2] || '').trim()
-          const optionB = (r[3] || '').trim()
-          const optionC = (r[4] || '').trim()
-          const optionD = (r[5] || '').trim()
-          const rawCorrect = (r[6] || '').trim().toUpperCase()
-          const explanation = (r[7] || '').trim()
-          const rawImageUrl = (r[8] || '').trim()
+
+          let rawSubject = ''
+          let rawTopic = ''
+          let questionText = ''
+          let optionA = ''
+          let optionB = ''
+          let optionC = ''
+          let optionD = ''
+          let rawCorrect = ''
+          let explanation = ''
+          let rawYear = ''
+          let rawImageUrl = ''
+
+          if (is11Col) {
+            rawSubject = (r[0] || '').trim()
+            rawTopic = (r[1] || '').trim()
+            questionText = (r[2] || '').trim()
+            optionA = (r[3] || '').trim()
+            optionB = (r[4] || '').trim()
+            optionC = (r[5] || '').trim()
+            optionD = (r[6] || '').trim()
+            rawCorrect = (r[7] || '').trim().toUpperCase()
+            explanation = (r[8] || '').trim()
+            rawYear = (r[9] || '').trim()
+            rawImageUrl = (r[10] || '').trim()
+          } else {
+            // Legacy 9-column fallback
+            rawSubject = (r[0] || '').trim()
+            rawTopic = 'General'
+            questionText = (r[1] || '').trim()
+            optionA = (r[2] || '').trim()
+            optionB = (r[3] || '').trim()
+            optionC = (r[4] || '').trim()
+            optionD = (r[5] || '').trim()
+            rawCorrect = (r[6] || '').trim().toUpperCase()
+            explanation = (r[7] || '').trim()
+            rawYear = ''
+            rawImageUrl = (r[8] || '').trim()
+          }
+
           const imageUrl = rawImageUrl === '' ? null : rawImageUrl
+          const parsedYear = rawYear && !isNaN(parseInt(rawYear, 10)) ? parseInt(rawYear, 10) : null
+          const topicName = rawTopic || 'General'
 
           const matchedSub = findSubjectMatch(rawSubject)
 
@@ -1311,6 +1495,9 @@ export const Admin: React.FC = () => {
             rawSubject,
             subjectId: matchedSub ? matchedSub.id : null,
             subjectName: matchedSub ? matchedSub.name : 'Unknown Subject',
+            rawTopic,
+            topicName,
+            topicId: null,
             questionText,
             optionA,
             optionB,
@@ -1323,6 +1510,7 @@ export const Admin: React.FC = () => {
               | 'D'
               | '',
             explanation,
+            examYear: parsedYear,
             imageUrl,
             isValid,
             validationError,
@@ -1351,27 +1539,128 @@ export const Admin: React.FC = () => {
     setBulkError(null)
 
     try {
-      const rowsToInsert = validQuestions.map((q) => ({
-        subject_id: q.subjectId!,
-        question_text: q.questionText.trim(),
-        option_a: q.optionA.trim(),
-        option_b: q.optionB.trim(),
-        option_c: q.optionC.trim(),
-        option_d: q.optionD.trim(),
-        correct_option: q.correctOption as 'A' | 'B' | 'C' | 'D',
-        explanation: q.explanation.trim() || null,
-        image_url: q.imageUrl ? q.imageUrl.trim() || null : null,
-      }))
+      // -----------------------------------------------------------------------
+      // Pass 1: Two-Pass Batch Topic Resolution & Upsert
+      // -----------------------------------------------------------------------
+      // Lookup key: `${subject_id}::${topic_name.toLowerCase()}` -> topic_id
+      const topicLookup = new Map<string, string>()
 
-      const { error: insertErr } = await supabase.from('questions').insert(rowsToInsert)
+      // Extract unique (subjectId, topicName) pairs across all valid questions
+      const topicPairsMap = new Map<string, { subjectId: string; topicName: string }>()
+      for (const q of validQuestions) {
+        const tName = (q.topicName || q.rawTopic || '').trim()
+        if (q.subjectId && tName) {
+          const key = `${q.subjectId}::${tName.toLowerCase()}`
+          if (!topicPairsMap.has(key)) {
+            topicPairsMap.set(key, { subjectId: q.subjectId, topicName: tName })
+          }
+        }
+      }
 
-      if (insertErr) throw insertErr
+      const uniqueSubjectIds = Array.from(new Set(validQuestions.map((q) => q.subjectId!)))
+
+      // Query existing topics for these subjects
+      let topicsTableAvailable = true
+      try {
+        const { data: existingTopics, error: fetchTopicsErr } = await supabase
+          .from('topics')
+          .select('id, subject_id, name')
+          .in('subject_id', uniqueSubjectIds)
+
+        if (fetchTopicsErr) {
+          if (fetchTopicsErr.code === 'PGRST205' || fetchTopicsErr.message?.includes('schema cache')) {
+            console.warn('[Admin] topics table does not exist in schema cache yet. Questions will be inserted without topic_id.')
+            topicsTableAvailable = false
+          } else {
+            throw fetchTopicsErr
+          }
+        } else if (existingTopics) {
+          for (const t of existingTopics) {
+            const key = `${t.subject_id}::${t.name.trim().toLowerCase()}`
+            topicLookup.set(key, t.id)
+          }
+        }
+      } catch (err) {
+        console.warn('[Admin] Could not query topics table:', err)
+        topicsTableAvailable = false
+      }
+
+      // If topics table is available, batch insert any missing topics
+      if (topicsTableAvailable && topicPairsMap.size > 0) {
+        const missingTopics: { subject_id: string; name: string }[] = []
+        for (const [key, pair] of topicPairsMap.entries()) {
+          if (!topicLookup.has(key)) {
+            missingTopics.push({
+              subject_id: pair.subjectId,
+              name: pair.topicName,
+            })
+          }
+        }
+
+        if (missingTopics.length > 0) {
+          const { data: insertedTopics, error: insertTopicsErr } = await supabase
+            .from('topics')
+            .insert(missingTopics)
+            .select('id, subject_id, name')
+
+          if (insertTopicsErr) {
+            console.warn('[Admin] Topic batch insert conflict or error, re-fetching topics:', insertTopicsErr.message)
+            const { data: refetched } = await supabase
+              .from('topics')
+              .select('id, subject_id, name')
+              .in('subject_id', uniqueSubjectIds)
+            if (refetched) {
+              for (const t of refetched) {
+                const key = `${t.subject_id}::${t.name.trim().toLowerCase()}`
+                topicLookup.set(key, t.id)
+              }
+            }
+          } else if (insertedTopics) {
+            for (const t of insertedTopics) {
+              const key = `${t.subject_id}::${t.name.trim().toLowerCase()}`
+              topicLookup.set(key, t.id)
+            }
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Pass 2: Map Questions with topic_id and Batch Insert in Chunks of 200
+      // -----------------------------------------------------------------------
+      const rowsToInsert = validQuestions.map((q) => {
+        const tName = (q.topicName || q.rawTopic || '').trim()
+        const topicKey = q.subjectId && tName ? `${q.subjectId}::${tName.toLowerCase()}` : null
+        const resolvedTopicId = topicKey && topicLookup.has(topicKey) ? topicLookup.get(topicKey) : null
+
+        return {
+          subject_id: q.subjectId!,
+          topic_id: resolvedTopicId || null,
+          question_text: q.questionText.trim(),
+          option_a: q.optionA.trim(),
+          option_b: q.optionB.trim(),
+          option_c: q.optionC.trim(),
+          option_d: q.optionD.trim(),
+          correct_option: q.correctOption as 'A' | 'B' | 'C' | 'D',
+          explanation: q.explanation.trim() || null,
+          exam_year: q.examYear ?? null,
+          image_url: q.imageUrl ? q.imageUrl.trim() || null : null,
+        }
+      })
+
+      const CHUNK_SIZE = 200
+      for (let i = 0; i < rowsToInsert.length; i += CHUNK_SIZE) {
+        const chunk = rowsToInsert.slice(i, i + CHUNK_SIZE)
+        const { error: insertErr } = await supabase.from('questions').insert(chunk)
+        if (insertErr) throw insertErr
+      }
 
       setQuestionActionMsg({
         type: 'success',
-        text: `Batch upload successful! Added ${rowsToInsert.length} questions to the database.`,
+        text: `Batch upload successful! Added ${rowsToInsert.length} questions across ${topicPairsMap.size} topics to the database.`,
       })
 
+      // Refresh topics and questions
+      await fetchTopics()
       if (selectedSubjectId) {
         fetchQuestions(selectedSubjectId)
       }
@@ -1389,18 +1678,22 @@ export const Admin: React.FC = () => {
   }
 
   const handleDownloadTemplate = () => {
+    const headers =
+      'Subject,Topic,Question Text,Option A,Option B,Option C,Option D,Correct Option,Explanation,Exam Year,Image URL\n'
     const sample =
-      'Subject,Question Text,Option A,Option B,Option C,Option D,Correct Option,Explanation,Image URL\n' +
-      'Use of English,"Which word has the same vowel sound as ""feet""?",Beat,Bit,Bet,Bait,A,"The letters ee in feet represent the long /i:/ vowel sound, identical to ea in beat.",\n' +
-      'Mathematics,"Solve for x: 3x - 7 = 14.",5,7,9,11,B,"Add 7: 3x = 21, then divide by 3: x = 7.",\n' +
-      'Physics,"What is the SI unit of electrical resistance?",Watt,Volt,Ohm,Ampere,C,"Resistance is measured in Ohms (Ω).",https://images.unsplash.com/photo-1632571401005-458e9d244591\n' +
-      'Chemistry,"What is the chemical formula for ordinary table salt?",HCl,NaCl,NaOH,KCl,B,"Sodium chloride is NaCl.",\n'
+      headers +
+      'Use of English,Vowel Sounds,"Which word has the same vowel sound as ""feet""?",Beat,Bit,Bet,Bait,A,"The letters ee in feet represent the long /i:/ vowel sound, identical to ea in beat.",2024,\n' +
+      'Mathematics,Algebra,"Solve for x: 3x - 7 = 14.",5,7,9,11,B,"Add 7: 3x = 21, then divide by 3: x = 7.",2023,\n' +
+      'Physics,Electricity,"What is the SI unit of electrical resistance?",Watt,Volt,Ohm,Ampere,C,"Resistance is measured in Ohms (Ω).",2024,https://images.unsplash.com/photo-1632571401005-458e9d244591\n' +
+      'Chemistry,Inorganic Chemistry,"What is the chemical formula for ordinary table salt?",HCl,NaCl,NaOH,KCl,B,"Sodium chloride is NaCl.",2022,\n' +
+      'Biology,Cell Biology,"Which organelle is known as the powerhouse of the cell?",Nucleus,Mitochondria,Ribosome,Chloroplast,B,"Mitochondria produce cellular energy (ATP) through aerobic respiration.",2024,\n' +
+      'Economics,Market Structures,"In which market structure are there many buyers and sellers selling identical products?",Monopoly,Oligopoly,Perfect Competition,Monopsony,C,"Under perfect competition, firms sell homogeneous goods with free entry and exit.",2023,\n'
 
     const blob = new Blob([sample], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.setAttribute('download', 'jambstar_questions_template.csv')
+    link.setAttribute('download', 'jambstar_topic_questions_template.csv')
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -1499,6 +1792,30 @@ export const Admin: React.FC = () => {
       )
       .slice(0, 5)
   }, [profiles, quickGrantSearch])
+
+  // Quick Pro grant search candidates (all users by email, name, or ID)
+  const proGrantCandidates = useMemo(() => {
+    if (!proGrantSearch.trim()) return []
+    const term = proGrantSearch.toLowerCase().trim()
+
+    // Find any user IDs linked to tickets with this email
+    const emailMatchedUserIds = new Set(
+      supportTickets
+        .filter((t) => (t.guest_email || '').toLowerCase().includes(term))
+        .map((t) => t.user_id)
+        .filter(Boolean) as string[]
+    )
+
+    return profiles
+      .filter(
+        (p) =>
+          (p.full_name || '').toLowerCase().includes(term) ||
+          p.id.toLowerCase().includes(term) ||
+          (p.email || '').toLowerCase().includes(term) ||
+          emailMatchedUserIds.has(p.id)
+      )
+      .slice(0, 6)
+  }, [profiles, proGrantSearch, supportTickets])
 
   // Computed exact metric counts distinguishing Total System Users, Candidates, and Staff/Admins
   const totalSystemUsers = totalProfilesCount || profiles.length
@@ -2822,6 +3139,118 @@ export const Admin: React.FC = () => {
               </div>
             )}
 
+            {/* Quick Manual Pro Tier Grant/Revoke Box (Super Admin & Authorized Staff) */}
+            {canManagePro && (
+              <div className="bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-2xl border border-amber-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">⭐</span>
+                    <h3 className="text-xs sm:text-sm font-bold text-amber-950">
+                      Manual JAMBStar Pro Tier Management
+                    </h3>
+                  </div>
+                  <span className="text-[11px] font-semibold bg-amber-100 text-amber-800 px-2 py-0.5 rounded border border-amber-300">
+                    {isSuperAdmin ? 'Super Admin Override' : 'Authorized Staff'}
+                  </span>
+                </div>
+                <p className="text-xs text-amber-800">
+                  Search any user account by email, user ID, or name to manually activate or revoke full Pro tier access, bypassing Paystack checkout.
+                </p>
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder="Type candidate email, user ID, or name to grant or revoke Pro..."
+                    value={proGrantSearch}
+                    onChange={(e) => setProGrantSearch(e.target.value)}
+                    className="w-full px-3.5 py-2 text-xs sm:text-sm bg-white border border-amber-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                  {proGrantCandidates.length > 0 ? (
+                    <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-lg p-2 space-y-1.5 max-h-60 overflow-y-auto">
+                      {proGrantCandidates.map((c) => {
+                        const isPro = c.tier === 'pro'
+                        return (
+                          <div
+                            key={c.id}
+                            className="p-2.5 rounded-lg bg-gray-50 hover:bg-amber-50/60 flex items-center justify-between gap-3 text-xs border border-gray-100"
+                          >
+                            <div>
+                              <div className="font-bold text-gray-900 flex items-center gap-2">
+                                <span>{c.full_name || 'Unnamed Candidate'}</span>
+                                {isPro ? (
+                                  <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-1.5 py-0.5 rounded border border-amber-300">
+                                    ⭐ Pro Active
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] bg-gray-100 text-gray-600 font-medium px-1.5 py-0.5 rounded">
+                                    Free Tier
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] font-mono text-gray-400">ID: {c.id}</div>
+                            </div>
+                            <div>
+                              {isPro ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleToggleUserTier(c.id, 'free')
+                                    setProGrantSearch('')
+                                  }}
+                                  className="px-3 py-1 bg-red-50 hover:bg-red-100 text-red-700 font-bold rounded-lg text-xs cursor-pointer border border-red-200 transition-colors"
+                                >
+                                  Revoke Pro
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleToggleUserTier(c.id, 'pro')
+                                    setProGrantSearch('')
+                                  }}
+                                  className="px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-lg text-xs cursor-pointer shadow-xs transition-colors"
+                                >
+                                  ⭐ Grant Pro
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : proGrantSearch.trim().length >= 4 && (
+                    <div className="absolute z-20 left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-lg p-3 space-y-2 text-xs">
+                      <div className="text-gray-600 flex items-center gap-1.5">
+                        <span>ℹ️</span>
+                        <span>No candidate in preloaded list matching <strong className="font-mono text-gray-900">"{proGrantSearch}"</strong>. Apply tier update directly to this User ID:</span>
+                      </div>
+                      <div className="flex items-center gap-2 pt-1 border-t border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleToggleUserTier(proGrantSearch.trim(), 'pro')
+                            setProGrantSearch('')
+                          }}
+                          className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-lg text-xs cursor-pointer shadow-xs"
+                        >
+                          ⭐ Grant Pro to this ID
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleToggleUserTier(proGrantSearch.trim(), 'free')
+                            setProGrantSearch('')
+                          }}
+                          className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 font-bold rounded-lg text-xs cursor-pointer border border-red-200"
+                        >
+                          Revoke Pro for this ID
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Search & Filters */}
               <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row gap-3 items-center justify-between">
                 <div className="w-full sm:w-72">
@@ -2892,6 +3321,7 @@ export const Admin: React.FC = () => {
                         <tr>
                           <th className="py-3 px-4">Candidate Profile</th>
                           <th className="py-3 px-4">Track</th>
+                          <th className="py-3 px-4">Tier</th>
                           <th className="py-3 px-4">Current Role</th>
                           <th className="py-3 px-4">Role Switcher</th>
                           <th className="py-3 px-4 text-right">Account Actions</th>
@@ -2935,6 +3365,20 @@ export const Admin: React.FC = () => {
                                 >
                                   {p.track}
                                 </span>
+                              </td>
+
+                              {/* Candidate Tier */}
+                              <td className="py-3.5 px-4">
+                                {p.tier === 'pro' ? (
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                                    <span>⭐</span>
+                                    <span>Pro</span>
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
+                                    Free
+                                  </span>
+                                )}
                               </td>
 
                               <td className="py-3.5 px-4">
@@ -2981,9 +3425,32 @@ export const Admin: React.FC = () => {
                                 )}
                               </td>
 
-                              {/* Direct Message & Delete Account */}
+                              {/* Account Actions: Pro Grant/Revoke, Direct Message & Delete Account */}
                               <td className="py-3.5 px-4 text-right">
                                 <div className="flex items-center justify-end gap-2">
+                                  {/* Manual Pro Access Grant / Revoke */}
+                                  {canManagePro && !isSelf && (
+                                    p.tier === 'pro' ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleUserTier(p.id, 'free')}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition-colors cursor-pointer"
+                                        title="Revoke Pro Access"
+                                      >
+                                        <span>Revoke Pro</span>
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleUserTier(p.id, 'pro')}
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg transition-colors cursor-pointer"
+                                        title="Grant Pro Access (Bypass Payment)"
+                                      >
+                                        <span>⭐ Grant Pro</span>
+                                      </button>
+                                    )
+                                  )}
+
                                   {!isSelf && (
                                     <button
                                       type="button"
@@ -3044,7 +3511,7 @@ export const Admin: React.FC = () => {
                     <span>Admin Access Management</span>
                   </h2>
                   <p className="text-xs text-gray-500 mt-0.5">
-                    Configure granular permissions for administrative staff. Toggle access for posting notices, managing student accounts, and curating question banks.
+                    Configure granular permissions for administrative staff. Toggle access for posting notices, managing student accounts, curating question banks, and granting Pro tier.
                   </p>
                 </div>
                 <span className="text-xs font-mono font-bold px-3 py-1 rounded-full bg-purple-50 text-purple-700 border border-purple-200 self-start sm:self-auto">
@@ -3088,6 +3555,7 @@ export const Admin: React.FC = () => {
                           <th className="py-3.5 px-4 text-center">Post Notices</th>
                           <th className="py-3.5 px-4 text-center">Manage Users</th>
                           <th className="py-3.5 px-4 text-center">Manage Questions</th>
+                          <th className="py-3.5 px-4 text-center">Manage Pro Tier</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -3097,6 +3565,7 @@ export const Admin: React.FC = () => {
                             const canPost = adm.can_post_notices !== false
                             const canUsers = adm.can_manage_users !== false
                             const canQuestions = adm.can_manage_questions !== false
+                            const canPro = adm.can_manage_pro === true
 
                             return (
                               <tr key={adm.id} className="hover:bg-gray-50/70 transition-colors">
@@ -3183,6 +3652,32 @@ export const Admin: React.FC = () => {
                                   </button>
                                   <span className="block text-[10px] text-gray-500 mt-0.5">
                                     {canQuestions ? 'Allowed' : 'Restricted'}
+                                  </span>
+                                </td>
+
+                                {/* Toggle: Manage Pro Tier */}
+                                <td className="py-4 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleToggleAdminPermission(
+                                        adm.id,
+                                        'can_manage_pro',
+                                        canPro
+                                      )
+                                    }
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 ${
+                                      canPro ? 'bg-amber-500' : 'bg-gray-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                        canPro ? 'translate-x-6' : 'translate-x-1'
+                                      }`}
+                                    />
+                                  </button>
+                                  <span className="block text-[10px] text-gray-500 mt-0.5 font-medium">
+                                    {canPro ? '⭐ Authorized' : 'Restricted'}
                                   </span>
                                 </td>
                               </tr>
@@ -3465,9 +3960,9 @@ export const Admin: React.FC = () => {
 
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-4 rounded-xl bg-slate-50 border border-slate-200">
               <div>
-                <div className="text-xs font-semibold text-slate-700">Required CSV Column Format (9 Columns):</div>
+                <div className="text-xs font-semibold text-slate-700">Required CSV Column Format (11 Columns):</div>
                 <div className="text-[11px] font-mono text-slate-500 mt-0.5">
-                  Subject, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Image URL
+                  Subject, Topic, Question Text, Option A, Option B, Option C, Option D, Correct Option, Explanation, Exam Year, Image URL
                 </div>
               </div>
               <button
@@ -3535,7 +4030,7 @@ export const Admin: React.FC = () => {
                       }`}
                     >
                       <div className="space-y-1 flex-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center flex-wrap gap-2">
                           <span className="font-mono text-[10px] text-gray-400">Row {q.rowNumber}</span>
                           <span
                             className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
@@ -3544,6 +4039,14 @@ export const Admin: React.FC = () => {
                           >
                             {q.subjectName} ({q.rawSubject})
                           </span>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-800">
+                            Topic: {q.topicName || q.rawTopic || 'General'}
+                          </span>
+                          {q.examYear && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-800">
+                              Year: {q.examYear}
+                            </span>
+                          )}
                           {q.correctOption && (
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-100 text-gray-700">
                               Correct: {q.correctOption}
@@ -3644,7 +4147,7 @@ export const Admin: React.FC = () => {
             </div>
 
             <form onSubmit={handleSaveQuestion} className="mt-4 space-y-4 text-xs sm:text-sm">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 mb-1">Target Subject</label>
                   <select
@@ -3659,6 +4162,17 @@ export const Admin: React.FC = () => {
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Topic (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Organic Chemistry"
+                    value={newTopicName}
+                    onChange={(e) => setNewTopicName(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
                 </div>
 
                 <div>
