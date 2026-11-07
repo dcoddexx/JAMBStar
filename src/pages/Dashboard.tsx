@@ -726,6 +726,12 @@ export const Dashboard: React.FC = () => {
       isUntimed: boolean
     }
   ) => {
+    // Clear any previous active CBT session when launching a new exam
+    try {
+      localStorage.removeItem('jambstar_active_cbt_session')
+    } catch {
+      // ignore
+    }
     const chosenSubjects = subjects.filter((s) => chosenSubjectIds.includes(s.id))
     setShowPreExamModal(false)
     navigate('/quiz', {

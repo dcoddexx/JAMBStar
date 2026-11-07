@@ -2,27 +2,19 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { AdBanner } from '../components/AdBanner'
+import {
+  type Question,
+  type Subject,
+  type StoredCBTSession,
+  getStoredCBTSession,
+  saveCBTSession,
+  clearCBTSession,
+  loadExamQuestions,
+  shuffleArray,
+} from '../services/questions'
 
-export interface Question {
-  id: string
-  subject_id: string
-  question_text: string
-  option_a: string
-  option_b: string
-  option_c: string
-  option_d: string
-  correct_option: 'A' | 'B' | 'C' | 'D'
-  explanation?: string | null
-  exam_year?: number | null
-  image_url?: string | null
-}
-
-export interface Subject {
-  id: string
-  name: string
-  code: string
-  icon?: string | null
-}
+export type { Question, Subject }
+export { shuffleArray }
 
 interface SubjectScore {
   subjectId: string
@@ -40,20 +32,6 @@ interface QuizSubmissionResult {
   savedToDatabase: boolean
   isGuest: boolean
   errorMessage?: string | null
-}
-
-/**
- * Fisher-Yates (Knuth) Array Shuffle Algorithm
- * Produces an unbiased, uniform random permutation of array elements in O(n) time.
- * Prevents candidates from memorizing question sequences across subsequent retakes.
- */
-export function shuffleArray<T>(array: T[]): T[] {
-  const shuffled = [...array]
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
-  }
-  return shuffled
 }
 
 export const Quiz: React.FC = () => {
@@ -136,14 +114,62 @@ export const Quiz: React.FC = () => {
   const [reviewMode, setReviewMode] = useState<boolean>(false)
   const isSubmittingRef = useRef<boolean>(false)
 
-  // Load questions and subjects from Supabase
+  // Session persistence synchronization helper
+  const syncSession = useCallback(
+    (overrides?: Partial<StoredCBTSession>) => {
+      if (loading || reviewMode || submissionResult !== null || showResultModal) return
+      if (Object.keys(questionsBySubject).length === 0) return
+
+      const sessionData: StoredCBTSession = {
+        savedAtTimestamp: Date.now(),
+        timeRemainingSeconds: timeLeft,
+        userAnswers: selectedAnswers,
+        markedForReview,
+        questionsBySubject,
+        subjects,
+        activeSubjectId,
+        activeSubjectIndex: Math.max(
+          0,
+          subjects.findIndex((s) => s.id === activeSubjectId)
+        ),
+        activeQuestionIndex: currentQuestionIndex,
+        isTopicDrill,
+        isUntimed,
+        elapsedTime,
+        isDemoMode,
+        candidateUserId: candidateUser?.id || null,
+        ...overrides,
+      }
+      saveCBTSession(sessionData)
+    },
+    [
+      loading,
+      reviewMode,
+      submissionResult,
+      showResultModal,
+      questionsBySubject,
+      timeLeft,
+      selectedAnswers,
+      markedForReview,
+      subjects,
+      activeSubjectId,
+      currentQuestionIndex,
+      isTopicDrill,
+      isUntimed,
+      elapsedTime,
+      isDemoMode,
+      candidateUser,
+    ]
+  )
+
+  // Load questions and subjects with per-subject queries, UTME capping, and localStorage persistence
   useEffect(() => {
     const initializeQuiz = async () => {
       setLoading(true)
       setError(null)
 
       try {
-        // Check current authenticated user session
+        // 1. Check current authenticated user session
         const {
           data: { user },
         } = await supabase.auth.getUser()
@@ -151,16 +177,39 @@ export const Quiz: React.FC = () => {
         const isGuestOrDemo = searchParams.get('demo') === 'true' || !user
         setIsDemoMode(isGuestOrDemo)
 
-        if (isGuestOrDemo) {
-          setTimeLeft(600)
-        } else if (stateData?.durationMinutes && typeof stateData.durationMinutes === 'number' && stateData.durationMinutes > 0) {
-          setTimeLeft(Math.round(stateData.durationMinutes * 60))
-        }
-
         if (user) {
           setCandidateUser({ id: user.id, email: user.email })
         } else {
           setCandidateUser(null)
+        }
+
+        // 2. Check for active CBT Session in localStorage (handles F5 reload persistence)
+        const stored = getStoredCBTSession()
+        if (stored) {
+          const { session, restoredTimeLeft, restoredElapsedTime } = stored
+          setSubjects(session.subjects)
+          setQuestionsBySubject(session.questionsBySubject)
+          setSelectedAnswers(session.userAnswers || {})
+          setMarkedForReview(session.markedForReview || {})
+          setActiveSubjectId(
+            session.activeSubjectId || (session.subjects.length > 0 ? session.subjects[0].id : '')
+          )
+          setCurrentQuestionIndex(session.activeQuestionIndex || 0)
+          setTimeLeft(restoredTimeLeft)
+          setElapsedTime(restoredElapsedTime)
+          setLoading(false)
+          return
+        }
+
+        // 3. New session initialization
+        if (isGuestOrDemo) {
+          setTimeLeft(600)
+        } else if (
+          stateData?.durationMinutes &&
+          typeof stateData.durationMinutes === 'number' &&
+          stateData.durationMinutes > 0
+        ) {
+          setTimeLeft(Math.round(stateData.durationMinutes * 60))
         }
 
         // Strict guard: Authenticated candidates MUST pass through the CBT Setup modal
@@ -170,14 +219,11 @@ export const Quiz: React.FC = () => {
         }
 
         let targetSubjects: Subject[] = []
-        let targetSubjectIds: string[] = []
 
         if (isTopicDrill && stateData?.drillSubject) {
           targetSubjects = [stateData.drillSubject]
-          targetSubjectIds = [stateData.drillSubject.id]
         } else if (stateData?.selectedSubjects && stateData.selectedSubjects.length > 0 && !isGuestOrDemo) {
           targetSubjects = stateData.selectedSubjects
-          targetSubjectIds = stateData.selectedSubjectIds || targetSubjects.map((s) => s.id)
         } else {
           // Fallback: Fetch default subjects directly from Supabase (English, Maths, etc.)
           const { data: subData, error: subErr } = await supabase
@@ -190,80 +236,54 @@ export const Quiz: React.FC = () => {
 
           if (subData && subData.length > 0) {
             targetSubjects = subData
-            targetSubjectIds = subData.map((s) => s.id)
           } else {
             throw new Error('No subjects found in the database. Please initialize subjects first.')
           }
         }
 
-        // Fetch live questions from Supabase for the candidate's selected subjects
-        let qQuery = supabase
-          .from('questions')
-          .select('*')
-          .in('subject_id', targetSubjectIds)
-
-        if (isTopicDrill && stateData?.drillTopicIds && stateData.drillTopicIds.length > 0) {
-          qQuery = qQuery.in('topic_id', stateData.drillTopicIds)
-        }
-
-        const { data: questionsData, error: qErr } = await qQuery.order('created_at', { ascending: true })
-
-        if (qErr) throw qErr
-
-        let finalQuestions: Question[] = questionsData || []
-
-        // If topic drill returned no questions for specific topic filter, fallback to all questions of this subject
-        if (isTopicDrill && finalQuestions.length === 0) {
-          const { data: fallbackQuestions } = await supabase
-            .from('questions')
-            .select('*')
-            .in('subject_id', targetSubjectIds)
-            .limit(stateData?.questionCount || 20)
-          if (fallbackQuestions && fallbackQuestions.length > 0) {
-            finalQuestions = fallbackQuestions
+        // 4. Load exam questions using per-subject querying (fixes 1,000-row PostgREST truncation)
+        // Shuffles each subject's questions before capping (ENG: 60, Others: 40, Topic: preset)
+        const { subjects: loadedSubjects, questionsBySubject: loadedQuestions } = await loadExamQuestions(
+          targetSubjects,
+          {
+            isTopicDrill,
+            drillTopicIds: stateData?.drillTopicIds,
+            drillQuestionCount: stateData?.questionCount,
+            isDemoMode: isGuestOrDemo,
           }
+        )
+
+        setSubjects(loadedSubjects)
+        setQuestionsBySubject(loadedQuestions)
+
+        const firstActiveSubjId = loadedSubjects.length > 0 ? loadedSubjects[0].id : ''
+        if (firstActiveSubjId) {
+          setActiveSubjectId(firstActiveSubjId)
         }
 
-        if (isTopicDrill) {
-          const count = stateData?.questionCount || 20
-          finalQuestions = shuffleArray(finalQuestions).slice(0, count)
-        } else if (isGuestOrDemo) {
-          // Thoroughly shuffle before taking 10 questions for demo mode
-          finalQuestions = shuffleArray(finalQuestions).slice(0, 10)
-          const activeSubjIds = new Set(finalQuestions.map((q) => q.subject_id))
-          targetSubjects = targetSubjects.filter((s) => activeSubjIds.has(s.id))
-        }
+        // Initial save to localStorage for the newly initialized session
+        const initialTimeLeft = isGuestOrDemo
+          ? 600
+          : stateData?.durationMinutes && stateData.durationMinutes > 0
+          ? Math.round(stateData.durationMinutes * 60)
+          : timeLeft
 
-        setSubjects(targetSubjects)
-
-        // Group questions by subject_id and thoroughly randomize each subject with Fisher-Yates shuffle
-        const grouped: Record<string, Question[]> = {}
-        targetSubjects.forEach((s) => {
-          grouped[s.id] = []
+        saveCBTSession({
+          savedAtTimestamp: Date.now(),
+          timeRemainingSeconds: initialTimeLeft,
+          userAnswers: {},
+          markedForReview: {},
+          questionsBySubject: loadedQuestions,
+          subjects: loadedSubjects,
+          activeSubjectId: firstActiveSubjId,
+          activeSubjectIndex: 0,
+          activeQuestionIndex: 0,
+          isTopicDrill,
+          isUntimed,
+          elapsedTime: 0,
+          isDemoMode: isGuestOrDemo,
+          candidateUserId: user?.id || null,
         })
-
-        if (finalQuestions.length > 0) {
-          finalQuestions.forEach((q: Question) => {
-            if (!grouped[q.subject_id]) {
-              grouped[q.subject_id] = []
-            }
-            grouped[q.subject_id].push(q)
-          })
-
-          // Thoroughly shuffle question sequence for each subject to prevent memorization
-          targetSubjects.forEach((s) => {
-            if (grouped[s.id] && grouped[s.id].length > 1) {
-              grouped[s.id] = shuffleArray(grouped[s.id])
-            }
-          })
-        }
-
-        setQuestionsBySubject(grouped)
-
-        // Set active subject to the first subject
-        if (targetSubjects.length > 0) {
-          setActiveSubjectId(targetSubjects[0].id)
-        }
       } catch (err: unknown) {
         const e = err as Error
         console.error('Error initializing CBT quiz:', e)
@@ -274,7 +294,7 @@ export const Quiz: React.FC = () => {
     }
 
     initializeQuiz()
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Active Subject & Questions
   const activeSubject = useMemo(() => {
@@ -340,52 +360,92 @@ export const Quiz: React.FC = () => {
   const handleSelectOption = useCallback(
     (optionKey: string) => {
       if (!currentQ || reviewMode || showDemoCompleteModal) return
-      setSelectedAnswers((prev) => ({
-        ...prev,
+      const nextAnswers = {
+        ...selectedAnswers,
         [currentQ.id]: optionKey,
-      }))
+      }
+      setSelectedAnswers(nextAnswers)
+      syncSession({ userAnswers: nextAnswers, savedAtTimestamp: Date.now() })
     },
-    [currentQ, reviewMode, showDemoCompleteModal]
+    [currentQ, reviewMode, showDemoCompleteModal, selectedAnswers, syncSession]
   )
 
   // Toggle question review flag
   const handleToggleReview = useCallback(() => {
     if (!currentQ || showDemoCompleteModal) return
-    setMarkedForReview((prev) => ({
-      ...prev,
-      [currentQ.id]: !prev[currentQ.id],
-    }))
-  }, [currentQ, showDemoCompleteModal])
+    const nextReview = {
+      ...markedForReview,
+      [currentQ.id]: !markedForReview[currentQ.id],
+    }
+    setMarkedForReview(nextReview)
+    syncSession({ markedForReview: nextReview, savedAtTimestamp: Date.now() })
+  }, [currentQ, showDemoCompleteModal, markedForReview, syncSession])
 
-  // Seamless Next Navigation: switches to next subject or triggers demo completion modal on final question
+  // Seamless Next Navigation
   const handleNextQuestion = useCallback(() => {
     if (!isLastQuestionOfSubject) {
-      setCurrentQuestionIndex((prev) => prev + 1)
+      const nextIdx = currentQuestionIndex + 1
+      setCurrentQuestionIndex(nextIdx)
+      syncSession({ activeQuestionIndex: nextIdx, savedAtTimestamp: Date.now() })
     } else if (!isLastSubject && subjects[currentSubjectIndex + 1]) {
       const nextSubj = subjects[currentSubjectIndex + 1]
       setActiveSubjectId(nextSubj.id)
       setCurrentQuestionIndex(0)
+      syncSession({
+        activeSubjectId: nextSubj.id,
+        activeSubjectIndex: currentSubjectIndex + 1,
+        activeQuestionIndex: 0,
+        savedAtTimestamp: Date.now(),
+      })
     } else if (isDemoMode) {
-      // Reached the end of the 10-question demo queue
+      clearCBTSession()
       setShowDemoCompleteModal(true)
     }
-  }, [isLastQuestionOfSubject, isLastSubject, subjects, currentSubjectIndex, isDemoMode])
+  }, [
+    isLastQuestionOfSubject,
+    isLastSubject,
+    subjects,
+    currentSubjectIndex,
+    isDemoMode,
+    currentQuestionIndex,
+    syncSession,
+  ])
 
   // Seamless Previous Navigation
   const handlePrevQuestion = useCallback(() => {
     if (showDemoCompleteModal) return
     if (!isFirstQuestionOfSubject) {
-      setCurrentQuestionIndex((prev) => prev - 1)
+      const prevIdx = currentQuestionIndex - 1
+      setCurrentQuestionIndex(prevIdx)
+      syncSession({ activeQuestionIndex: prevIdx, savedAtTimestamp: Date.now() })
     } else if (!isFirstSubject && subjects[currentSubjectIndex - 1]) {
       const prevSubj = subjects[currentSubjectIndex - 1]
       setActiveSubjectId(prevSubj.id)
       const prevSubjQuestions = questionsBySubject[prevSubj.id] || []
-      setCurrentQuestionIndex(Math.max(0, prevSubjQuestions.length - 1))
+      const prevIdx = Math.max(0, prevSubjQuestions.length - 1)
+      setCurrentQuestionIndex(prevIdx)
+      syncSession({
+        activeSubjectId: prevSubj.id,
+        activeSubjectIndex: currentSubjectIndex - 1,
+        activeQuestionIndex: prevIdx,
+        savedAtTimestamp: Date.now(),
+      })
     }
-  }, [isFirstQuestionOfSubject, isFirstSubject, subjects, currentSubjectIndex, questionsBySubject, showDemoCompleteModal])
+  }, [
+    isFirstQuestionOfSubject,
+    isFirstSubject,
+    subjects,
+    currentSubjectIndex,
+    questionsBySubject,
+    showDemoCompleteModal,
+    currentQuestionIndex,
+    syncSession,
+  ])
 
-  // Calculate score and submit to Supabase quiz_results table
+  // Calculate score, clear active CBT session, and submit to Supabase quiz_results table
   const handleFinalSubmit = useCallback(async () => {
+    clearCBTSession()
+
     if (isDemoMode) {
       setShowSubmitConfirmModal(false)
       setShowDemoCompleteModal(true)
@@ -481,9 +541,9 @@ export const Quiz: React.FC = () => {
       setSubmitting(false)
       isSubmittingRef.current = false
     }
-  }, [subjects, questionsBySubject, selectedAnswers])
+  }, [subjects, questionsBySubject, selectedAnswers, isDemoMode])
 
-  // Timer / Stopwatch Effect
+  // Timer / Stopwatch Effect with localStorage Sync
   useEffect(() => {
     // Freeze timer if loading, already submitted, in review mode, or demo complete modal open
     if (loading || reviewMode || submissionResult !== null || showDemoCompleteModal) return
@@ -491,13 +551,18 @@ export const Quiz: React.FC = () => {
     // Untimed study mode: count up elapsed seconds
     if (isUntimed) {
       const timer = setInterval(() => {
-        setElapsedTime((prev) => prev + 1)
+        setElapsedTime((prev) => {
+          const nextElapsed = prev + 1
+          syncSession({ elapsedTime: nextElapsed, savedAtTimestamp: Date.now() })
+          return nextElapsed
+        })
       }, 1000)
       return () => clearInterval(timer)
     }
 
     // Timed mode: countdown
     if (timeLeft <= 0) {
+      clearCBTSession()
       if (isDemoMode) {
         setShowDemoCompleteModal(true)
         return
@@ -513,14 +578,28 @@ export const Quiz: React.FC = () => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(timer)
+          clearCBTSession()
           return 0
         }
-        return prev - 1
+        const nextTime = prev - 1
+        syncSession({ timeRemainingSeconds: nextTime, savedAtTimestamp: Date.now() })
+        return nextTime
       })
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [loading, reviewMode, submissionResult, timeLeft, submitting, handleFinalSubmit, isDemoMode, showDemoCompleteModal, isUntimed])
+  }, [
+    loading,
+    reviewMode,
+    submissionResult,
+    timeLeft,
+    submitting,
+    handleFinalSubmit,
+    isDemoMode,
+    showDemoCompleteModal,
+    isUntimed,
+    syncSession,
+  ])
 
   // Global Keydown Event Listener for JAMB 8-Key Shortcuts
   useEffect(() => {
@@ -638,13 +717,17 @@ export const Quiz: React.FC = () => {
         <div className="mt-6 flex justify-center gap-3">
           <Link
             to="/dashboard"
+            onClick={() => clearCBTSession()}
             className="px-5 py-2.5 rounded-lg bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700"
           >
             Return to Dashboard
           </Link>
           <button
-            onClick={() => window.location.reload()}
-            className="px-5 py-2.5 rounded-lg border border-gray-300 text-gray-700 font-semibold text-sm hover:bg-gray-50"
+            onClick={() => {
+              clearCBTSession()
+              window.location.reload()
+            }}
+            className="px-5 py-2.5 rounded-lg border border-gray-300 text-gray-700 font-semibold text-sm hover:bg-gray-50 cursor-pointer"
           >
             Retry
           </button>
@@ -653,13 +736,8 @@ export const Quiz: React.FC = () => {
     )
   }
 
-  // Empty questions fallback
-  const totalQuestionsLoaded = Object.values(questionsBySubject).reduce(
-    (acc, arr) => acc + arr.length,
-    0
-  )
-
-  if (totalQuestionsLoaded === 0) {
+  // Entire Exam Empty State Fallback
+  if (totalQuestionsCount === 0) {
     return (
       <div className="max-w-xl mx-auto my-12 p-8 bg-white rounded-2xl border border-gray-200 text-center shadow-sm">
         <span className="text-4xl">📝</span>
@@ -670,6 +748,7 @@ export const Quiz: React.FC = () => {
         <div className="mt-6">
           <Link
             to="/dashboard"
+            onClick={() => clearCBTSession()}
             className="px-5 py-2.5 rounded-lg bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700"
           >
             Select Different Subjects
@@ -737,7 +816,11 @@ export const Quiz: React.FC = () => {
               {reviewMode ? 'Status' : isUntimed ? 'Elapsed Time (Untimed)' : 'Time Remaining'}
             </div>
             <div className="font-mono text-xl sm:text-2xl font-bold leading-tight">
-              {reviewMode ? 'Exam Completed' : isUntimed ? formatTime(elapsedTime) : formatTime(timeLeft)}
+              {reviewMode
+                ? 'Exam Completed'
+                : isUntimed
+                ? formatTime(elapsedTime)
+                : formatTime(timeLeft)}
             </div>
           </div>
         </div>
@@ -747,6 +830,7 @@ export const Quiz: React.FC = () => {
           type="button"
           onClick={() => {
             if (reviewMode) {
+              clearCBTSession()
               navigate(isDemoMode ? '/' : '/dashboard')
             } else {
               setShowExitConfirmModal(true)
@@ -754,7 +838,13 @@ export const Quiz: React.FC = () => {
           }}
           className="text-xs sm:text-sm font-semibold text-gray-500 hover:text-red-700 transition-colors cursor-pointer underline sm:no-underline"
         >
-          {reviewMode ? (isDemoMode ? '← Back to Home' : '← Back to Dashboard') : isDemoMode ? 'Exit Demo' : 'Exit Exam'}
+          {reviewMode
+            ? isDemoMode
+              ? '← Back to Home'
+              : '← Back to Dashboard'
+            : isDemoMode
+            ? 'Exit Demo'
+            : 'Exit Exam'}
         </button>
       </div>
 
@@ -769,6 +859,12 @@ export const Quiz: React.FC = () => {
               onClick={() => {
                 setActiveSubjectId(subj.id)
                 setCurrentQuestionIndex(0)
+                syncSession({
+                  activeSubjectId: subj.id,
+                  activeSubjectIndex: subjects.findIndex((s) => s.id === subj.id),
+                  activeQuestionIndex: 0,
+                  savedAtTimestamp: Date.now(),
+                })
               }}
               className={`px-4 py-2.5 rounded-lg text-xs sm:text-sm font-semibold whitespace-nowrap transition-all duration-150 flex items-center gap-1.5 cursor-pointer ${
                 isActive
@@ -877,8 +973,42 @@ export const Quiz: React.FC = () => {
               )}
             </div>
           ) : (
-            <div className="text-center py-12 text-gray-500">
-              No questions found for this subject.
+            /* Clean Empty State UI block when a subject has 0 questions */
+            <div className="bg-white rounded-xl p-8 sm:p-12 text-center flex flex-col items-center justify-center my-auto space-y-3">
+              <div className="w-14 h-14 rounded-full bg-amber-50 border border-amber-200 text-amber-600 text-2xl flex items-center justify-center mb-1">
+                📂
+              </div>
+              <h3 className="text-lg font-bold text-gray-900">
+                No Questions Available for {activeSubject?.name || 'this Subject'}
+              </h3>
+              <p className="text-xs sm:text-sm text-gray-500 max-w-md">
+                There are currently no verified past questions recorded in the Question Bank for this subject.
+                Please switch to another subject tab or return to the setup dashboard to adjust your selection.
+              </p>
+              {subjects.some((s) => (questionsBySubject[s.id]?.length || 0) > 0) && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const availableSubj = subjects.find(
+                        (s) => (questionsBySubject[s.id]?.length || 0) > 0
+                      )
+                      if (availableSubj) {
+                        setActiveSubjectId(availableSubj.id)
+                        setCurrentQuestionIndex(0)
+                        syncSession({
+                          activeSubjectId: availableSubj.id,
+                          activeQuestionIndex: 0,
+                          savedAtTimestamp: Date.now(),
+                        })
+                      }
+                    }}
+                    className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-xs sm:text-sm font-semibold hover:bg-emerald-700 transition-colors cursor-pointer"
+                  >
+                    Switch to Available Subject →
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -886,7 +1016,7 @@ export const Quiz: React.FC = () => {
           <div className="mt-8 pt-5 border-t border-gray-100 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <button
-                disabled={isFirstQuestionOfSubject && isFirstSubject}
+                disabled={activeQuestions.length === 0 || (isFirstQuestionOfSubject && isFirstSubject)}
                 onClick={handlePrevQuestion}
                 className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
               >
@@ -895,7 +1025,7 @@ export const Quiz: React.FC = () => {
                   : '← Previous (P)'}
               </button>
               <button
-                disabled={!isDemoMode && isLastQuestionOfSubject && isLastSubject}
+                disabled={activeQuestions.length === 0 || (!isDemoMode && isLastQuestionOfSubject && isLastSubject)}
                 onClick={handleNextQuestion}
                 className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
               >
@@ -908,16 +1038,16 @@ export const Quiz: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-2">
-              {!reviewMode && (
+              {!reviewMode && currentQ && (
                 <button
                   onClick={handleToggleReview}
                   className={`px-3 sm:px-4 py-2 rounded-lg text-sm font-medium border transition-colors cursor-pointer ${
-                    currentQ && markedForReview[currentQ.id]
+                    markedForReview[currentQ.id]
                       ? 'bg-amber-500 text-white border-amber-600'
                       : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
                   }`}
                 >
-                  {currentQ && markedForReview[currentQ.id] ? 'Unflag' : 'Mark Review (R)'}
+                  {markedForReview[currentQ.id] ? 'Unflag' : 'Mark Review (R)'}
                 </button>
               )}
 
@@ -933,11 +1063,18 @@ export const Quiz: React.FC = () => {
                   disabled={submitting}
                   className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 shadow-sm disabled:opacity-50 cursor-pointer flex items-center gap-1.5 transition-colors"
                 >
-                  {submitting ? 'Saving Results...' : isDemoMode ? 'Complete Demo (S)' : 'Submit Exam (S)'}
+                  {submitting
+                    ? 'Saving Results...'
+                    : isDemoMode
+                    ? 'Complete Demo (S)'
+                    : 'Submit Exam (S)'}
                 </button>
               ) : (
                 <button
-                  onClick={() => navigate(isDemoMode ? '/' : '/dashboard')}
+                  onClick={() => {
+                    clearCBTSession()
+                    navigate(isDemoMode ? '/' : '/dashboard')
+                  }}
                   className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 shadow-sm cursor-pointer transition-colors"
                 >
                   {isDemoMode ? 'Return to Home' : 'Return to Dashboard'}
@@ -954,41 +1091,50 @@ export const Quiz: React.FC = () => {
             <h3 className="text-xs uppercase font-bold tracking-wider text-gray-500 mb-3">
               Question Palette ({activeSubject?.code || 'SUBJ'})
             </h3>
-            <div className="grid grid-cols-5 sm:grid-cols-6 lg:grid-cols-4 gap-2">
-              {activeQuestions.map((q, idx) => {
-                const isAnswered = !!selectedAnswers[q.id]
-                const isFlagged = !!markedForReview[q.id]
-                const isCurrent = idx === currentQuestionIndex
+            {activeQuestions.length === 0 ? (
+              <div className="py-6 text-center text-xs text-gray-400 italic">
+                No questions recorded for this subject
+              </div>
+            ) : (
+              <div className="grid grid-cols-5 sm:grid-cols-6 lg:grid-cols-4 gap-2">
+                {activeQuestions.map((q, idx) => {
+                  const isAnswered = !!selectedAnswers[q.id]
+                  const isFlagged = !!markedForReview[q.id]
+                  const isCurrent = idx === currentQuestionIndex
 
-                let btnStyle = 'bg-gray-100 text-gray-700 border-gray-200'
+                  let btnStyle = 'bg-gray-100 text-gray-700 border-gray-200'
 
-                if (reviewMode) {
-                  const isCorrect = selectedAnswers[q.id] === q.correct_option
-                  if (isCorrect) {
-                    btnStyle = 'bg-emerald-600 text-white border-emerald-600'
-                  } else if (isAnswered) {
-                    btnStyle = 'bg-red-500 text-white border-red-500'
+                  if (reviewMode) {
+                    const isCorrect = selectedAnswers[q.id] === q.correct_option
+                    if (isCorrect) {
+                      btnStyle = 'bg-emerald-600 text-white border-emerald-600'
+                    } else if (isAnswered) {
+                      btnStyle = 'bg-red-500 text-white border-red-500'
+                    } else {
+                      btnStyle = 'bg-gray-200 text-gray-400 border-gray-300'
+                    }
                   } else {
-                    btnStyle = 'bg-gray-200 text-gray-400 border-gray-300'
+                    if (isAnswered) btnStyle = 'bg-emerald-600 text-white border-emerald-600'
+                    if (isFlagged) btnStyle = 'bg-amber-500 text-white border-amber-500'
                   }
-                } else {
-                  if (isAnswered) btnStyle = 'bg-emerald-600 text-white border-emerald-600'
-                  if (isFlagged) btnStyle = 'bg-amber-500 text-white border-amber-500'
-                }
 
-                if (isCurrent) btnStyle += ' ring-2 ring-offset-2 ring-emerald-500'
+                  if (isCurrent) btnStyle += ' ring-2 ring-offset-2 ring-emerald-500'
 
-                return (
-                  <button
-                    key={q.id}
-                    onClick={() => setCurrentQuestionIndex(idx)}
-                    className={`h-9 rounded-lg font-bold text-xs border flex items-center justify-center transition-all cursor-pointer ${btnStyle}`}
-                  >
-                    {idx + 1}
-                  </button>
-                )
-              })}
-            </div>
+                  return (
+                    <button
+                      key={q.id}
+                      onClick={() => {
+                        setCurrentQuestionIndex(idx)
+                        syncSession({ activeQuestionIndex: idx, savedAtTimestamp: Date.now() })
+                      }}
+                      className={`h-9 rounded-lg font-bold text-xs border flex items-center justify-center transition-all cursor-pointer ${btnStyle}`}
+                    >
+                      {idx + 1}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
 
             <div className="mt-4 pt-3 border-t border-gray-100 flex flex-col gap-1.5 text-[11px] text-gray-500">
               <div className="flex items-center gap-2">
@@ -1104,6 +1250,7 @@ export const Quiz: React.FC = () => {
             <div className="flex flex-col sm:flex-row gap-3">
               <button
                 onClick={() => {
+                  clearCBTSession()
                   setShowResultModal(false)
                   setReviewMode(true)
                   setCurrentQuestionIndex(0)
@@ -1113,7 +1260,10 @@ export const Quiz: React.FC = () => {
                 Review Answers & Explanations
               </button>
               <button
-                onClick={() => navigate('/dashboard')}
+                onClick={() => {
+                  clearCBTSession()
+                  navigate('/dashboard')
+                }}
                 className="flex-1 py-3 px-4 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-xl text-sm font-semibold transition-colors cursor-pointer"
               >
                 Return to Dashboard
@@ -1166,14 +1316,20 @@ export const Quiz: React.FC = () => {
             <div className="flex flex-col sm:flex-row gap-3">
               <button
                 type="button"
-                onClick={() => navigate('/?auth=signup')}
+                onClick={() => {
+                  clearCBTSession()
+                  navigate('/?auth=signup')
+                }}
                 className="flex-1 py-3 px-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold shadow-md hover:shadow-lg transition-all cursor-pointer"
               >
                 Create Account / Sign In
               </button>
               <button
                 type="button"
-                onClick={() => navigate('/')}
+                onClick={() => {
+                  clearCBTSession()
+                  navigate('/')
+                }}
                 className="py-3 px-5 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-xl text-sm font-semibold transition-colors cursor-pointer"
               >
                 Exit Demo
@@ -1207,7 +1363,10 @@ export const Quiz: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => navigate(isDemoMode ? '/' : '/dashboard')}
+                onClick={() => {
+                  clearCBTSession()
+                  navigate(isDemoMode ? '/' : '/dashboard')
+                }}
                 className="flex-1 py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-semibold transition-colors cursor-pointer shadow-xs"
               >
                 {isDemoMode ? 'Yes, Exit Demo' : 'Yes, Exit Exam'}
