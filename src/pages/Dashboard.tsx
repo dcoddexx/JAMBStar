@@ -4,6 +4,11 @@ import { supabase } from '../lib/supabase'
 import { AdBanner } from '../components/AdBanner'
 import { UpgradeModal } from '../components/UpgradeModal'
 import { CBTSetupModal } from '../components/CBTSetupModal'
+import {
+  NIGERIAN_BANKS,
+  resolvePaystackAccount,
+  generateReferralCode,
+} from '../services/monetization'
 
 export interface Subject {
   id: string
@@ -57,7 +62,39 @@ export interface Notice {
   created_at: string
 }
 
-type DashboardTab = 'cbt' | 'messages' | 'notices'
+export interface WalletData {
+  id?: string
+  user_id?: string
+  balance: number
+  total_earned: number
+  total_withdrawn: number
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PayoutData {
+  id: string
+  user_id: string
+  amount: number
+  bank_name: string
+  bank_code: string
+  account_number: string
+  account_name: string
+  status: 'pending' | 'processing' | 'completed' | 'rejected'
+  reference: string | null
+  created_at: string
+}
+
+export interface ReferralData {
+  id: string
+  referrer_id: string
+  referred_id: string
+  reward_amount: number
+  status: 'pending' | 'completed' | 'cancelled'
+  created_at: string
+}
+
+type DashboardTab = 'cbt' | 'messages' | 'notices' | 'monetization'
 
 export const Dashboard: React.FC = () => {
   const navigate = useNavigate()
@@ -66,6 +103,7 @@ export const Dashboard: React.FC = () => {
     const tabParam = searchParams.get('tab')
     if (tabParam === 'messages') return 'messages'
     if (tabParam === 'notices') return 'notices'
+    if (tabParam === 'monetization') return 'monetization'
     return 'cbt'
   })
 
@@ -82,6 +120,43 @@ export const Dashboard: React.FC = () => {
 
   const [quizHistory, setQuizHistory] = useState<QuizResultHistory[]>([])
   const [loadingHistory, setLoadingHistory] = useState<boolean>(true)
+
+  // Monetization & Payout State
+  const [monetizationStatus, setMonetizationStatus] = useState<'none' | 'invited' | 'active' | 'declined'>('none')
+  const [referralCode, setReferralCode] = useState<string | null>(null)
+  const [bankName, setBankName] = useState<string | null>(null)
+  const [bankCode, setBankCode] = useState<string | null>(null)
+  const [accountNumber, setAccountNumber] = useState<string | null>(null)
+  const [accountName, setAccountName] = useState<string | null>(null)
+  const [bankDetailsUpdatedAt, setBankDetailsUpdatedAt] = useState<string | null>(null)
+
+  const [wallet, setWallet] = useState<WalletData | null>(null)
+  const [payouts, setPayouts] = useState<PayoutData[]>([])
+  const [referrals, setReferrals] = useState<ReferralData[]>([])
+  const [loadingMonetization, setLoadingMonetization] = useState<boolean>(false)
+
+  // Candidate Opt-In / Invitation Modal State
+  const [showInviteModal, setShowInviteModal] = useState<boolean>(false)
+  const [inviteModalStep, setInviteModalStep] = useState<'invite' | 'bank_setup' | 'success'>('invite')
+  const [acceptingInvite, setAcceptingInvite] = useState<boolean>(false)
+  const [decliningInvite, setDecliningInvite] = useState<boolean>(false)
+
+  // Modal Bank Setup State
+  const [modalBankCode, setModalBankCode] = useState<string>('')
+  const [modalBankName, setModalBankName] = useState<string>('')
+  const [modalAccountNumber, setModalAccountNumber] = useState<string>('')
+  const [modalAccountName, setModalAccountName] = useState<string>('')
+  const [modalResolvingBank, setModalResolvingBank] = useState<boolean>(false)
+  const [modalBankError, setModalBankError] = useState<string | null>(null)
+  const [modalSavingBank, setModalSavingBank] = useState<boolean>(false)
+
+  // Payout Request Modal
+  const [showPayoutModal, setShowPayoutModal] = useState<boolean>(false)
+  const [payoutAmount, setPayoutAmount] = useState<string>('1000')
+  const [requestingPayout, setRequestingPayout] = useState<boolean>(false)
+  const [payoutModalError, setPayoutModalError] = useState<string | null>(null)
+  const [payoutSuccessMsg, setPayoutSuccessMsg] = useState<string | null>(null)
+  const [copiedLink, setCopiedLink] = useState<boolean>(false)
 
   // Candidate Support & Messaging State
   const [tickets, setTickets] = useState<SupportTicket[]>([])
@@ -241,14 +316,46 @@ export const Dashboard: React.FC = () => {
         return
       }
 
-      // Read profile for greeting, subscription tier, and last read notices timestamp
+      // Read profile for greeting, subscription tier, and monetization fields
       const { data: profile } = await supabase
         .from('profiles')
-        .select('full_name, track, tier, last_read_notices')
+        .select('full_name, track, tier, is_pro, monetization_status, referral_code, bank_name, bank_code, account_number, account_name, bank_details_updated_at, last_read_notices')
         .eq('id', user.id)
         .maybeSingle()
 
-      setUserTier(profile?.tier === 'pro' ? 'pro' : 'free')
+      const isProUser = profile?.tier === 'pro' || profile?.is_pro === true
+      setUserTier(isProUser ? 'pro' : 'free')
+
+      // Legacy Pro Backfill Check: Automatically invite existing Pro candidates on login/dashboard load
+      if (isProUser && (!profile?.monetization_status || profile.monetization_status === 'none')) {
+        const nowIso = new Date().toISOString()
+        await supabase
+          .from('profiles')
+          .update({
+            is_pro: true,
+            monetization_status: 'invited',
+            monetization_invited_at: nowIso,
+          })
+          .eq('id', user.id)
+        setMonetizationStatus('invited')
+        setShowInviteModal(true)
+      } else if (profile?.monetization_status) {
+        setMonetizationStatus(profile.monetization_status)
+        if (profile.monetization_status === 'invited') {
+          setShowInviteModal(true)
+        }
+      }
+      if (profile?.referral_code) setReferralCode(profile.referral_code)
+      if (profile?.bank_name) setBankName(profile.bank_name)
+      if (profile?.bank_code) setBankCode(profile.bank_code)
+      if (profile?.account_number) setAccountNumber(profile.account_number)
+      if (profile?.account_name) setAccountName(profile.account_name)
+      if (profile?.bank_details_updated_at) setBankDetailsUpdatedAt(profile.bank_details_updated_at)
+
+      if (profile?.monetization_status === 'active') {
+        fetchWalletAndMonetization(user.id)
+      }
+
       if (activeTab === 'notices') {
         const nowIso = new Date().toISOString()
         setLastReadNotices(nowIso)
@@ -460,6 +567,323 @@ export const Dashboard: React.FC = () => {
     } finally {
       setCreatingTicket(false)
     }
+  }
+
+  // Monetization & Wallet Fetcher
+  const fetchWalletAndMonetization = async (userId: string) => {
+    setLoadingMonetization(true)
+    try {
+      const { data: walletData } = await supabase
+        .from('wallets')
+        .select('*')
+        .eq('user_id', userId)
+        .maybeSingle()
+
+      if (walletData) {
+        setWallet(walletData as WalletData)
+      } else {
+        setWallet({ balance: 0, total_earned: 0, total_withdrawn: 0 })
+      }
+
+      const { data: payoutData } = await supabase
+        .from('payouts')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+
+      if (payoutData) setPayouts(payoutData as PayoutData[])
+
+      const { data: referralData } = await supabase
+        .from('referrals')
+        .select('*')
+        .eq('referrer_id', userId)
+        .order('created_at', { ascending: false })
+
+      if (referralData) setReferrals(referralData as ReferralData[])
+    } catch (err) {
+      console.warn('Error fetching monetization details:', err)
+    } finally {
+      setLoadingMonetization(false)
+    }
+  }
+
+  // Monetization Invite Actions
+  const handleAcceptInvite = async () => {
+    if (!currentUser) return
+    setAcceptingInvite(true)
+    try {
+      const code = generateReferralCode(currentUser.full_name)
+      const nowIso = new Date().toISOString()
+
+      const { error: profErr } = await supabase
+        .from('profiles')
+        .update({
+          monetization_status: 'active',
+          referral_code: code,
+          updated_at: nowIso,
+        })
+        .eq('id', currentUser.id)
+
+      if (profErr) throw profErr
+
+      setMonetizationStatus('active')
+      setReferralCode(code)
+
+      // Initialize wallet
+      const { data: existingWallet } = await supabase
+        .from('wallets')
+        .select('id')
+        .eq('user_id', currentUser.id)
+        .maybeSingle()
+
+      if (!existingWallet) {
+        await supabase.from('wallets').insert({
+          user_id: currentUser.id,
+          balance: 0.0,
+          total_earned: 0.0,
+          total_withdrawn: 0.0,
+        })
+        setWallet({ balance: 0, total_earned: 0, total_withdrawn: 0 })
+      }
+
+      setInviteModalStep('bank_setup')
+    } catch (err: unknown) {
+      const e = err as Error
+      alert('Could not accept invitation: ' + e.message)
+    } finally {
+      setAcceptingInvite(false)
+    }
+  }
+
+  const handleDeclineInvite = async () => {
+    if (!currentUser) return
+    setDecliningInvite(true)
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          monetization_status: 'declined',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', currentUser.id)
+
+      if (error) throw error
+
+      setMonetizationStatus('declined')
+      setShowInviteModal(false)
+      setPaystackAlert('Monetization invitation declined. You can request a new invitation at any time via a support ticket.')
+      setTimeout(() => setPaystackAlert(null), 7000)
+    } catch (err: unknown) {
+      const e = err as Error
+      alert('Could not decline invitation: ' + e.message)
+    } finally {
+      setDecliningInvite(false)
+    }
+  }
+
+  // Bank Setup in Modal
+  const handleModalBankSelect = (code: string) => {
+    setModalBankCode(code)
+    const found = NIGERIAN_BANKS.find((b) => b.code === code)
+    if (found) setModalBankName(found.name)
+    setModalAccountName('')
+    setModalBankError(null)
+  }
+
+  const handleModalAccountNumberChange = async (val: string) => {
+    const cleaned = val.replace(/\D/g, '').slice(0, 10)
+    setModalAccountNumber(cleaned)
+    setModalBankError(null)
+
+    if (cleaned.length === 10 && modalBankCode) {
+      setModalResolvingBank(true)
+      const res = await resolvePaystackAccount(cleaned, modalBankCode)
+      setModalResolvingBank(false)
+      if (res.success && res.account_name) {
+        setModalAccountName(res.account_name)
+        setModalBankError(null)
+      } else {
+        setModalAccountName('')
+        setModalBankError(res.message || 'Could not verify account name.')
+      }
+    } else {
+      setModalAccountName('')
+    }
+  }
+
+  const handleModalVerify = async () => {
+    if (modalAccountNumber.length !== 10) {
+      setModalBankError('Account number must be 10 digits.')
+      return
+    }
+    if (!modalBankCode) {
+      setModalBankError('Please select your bank.')
+      return
+    }
+    setModalResolvingBank(true)
+    setModalBankError(null)
+    const res = await resolvePaystackAccount(modalAccountNumber, modalBankCode)
+    setModalResolvingBank(false)
+    if (res.success && res.account_name) {
+      setModalAccountName(res.account_name)
+      setModalBankError(null)
+    } else {
+      setModalAccountName('')
+      setModalBankError(res.message || 'Could not verify account name.')
+    }
+  }
+
+  const handleSaveModalBank = async () => {
+    if (!currentUser) return
+    if (modalAccountNumber.length !== 10) {
+      setModalBankError('Account number must be 10 digits.')
+      return
+    }
+    if (!modalBankCode || !modalBankName) {
+      setModalBankError('Please select your bank.')
+      return
+    }
+    if (!modalAccountName.trim()) {
+      setModalBankError('Please verify your account details with Paystack before saving.')
+      return
+    }
+
+    setModalSavingBank(true)
+    setModalBankError(null)
+    try {
+      const nowIso = new Date().toISOString()
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          bank_name: modalBankName,
+          bank_code: modalBankCode,
+          account_number: modalAccountNumber,
+          account_name: modalAccountName.trim(),
+          bank_details_updated_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('id', currentUser.id)
+
+      if (error) throw error
+
+      setBankName(modalBankName)
+      setBankCode(modalBankCode)
+      setAccountNumber(modalAccountNumber)
+      setAccountName(modalAccountName.trim())
+      setBankDetailsUpdatedAt(nowIso)
+      setInviteModalStep('success')
+    } catch (err: unknown) {
+      const e = err as Error
+      setModalBankError(e.message || 'Failed to save bank details.')
+    } finally {
+      setModalSavingBank(false)
+    }
+  }
+
+  const handleRequestReinvitation = async () => {
+    if (!currentUser) return
+    try {
+      const { data: ticket, error: ticketErr } = await supabase
+        .from('support_tickets')
+        .insert({
+          user_id: currentUser.id,
+          subject: 'Monetization Re-invitation Request',
+          category: 'Monetization Re-invitation Request',
+          status: 'open',
+        })
+        .select()
+        .single()
+
+      if (ticketErr) throw ticketErr
+
+      await supabase.from('ticket_messages').insert({
+        ticket_id: ticket.id,
+        sender_id: currentUser.id,
+        sender_name: currentUser.full_name || 'Candidate',
+        message: 'Hello Admin, I previously declined or missed my monetization invitation. I would like to request a new invitation to participate in the JAMBStar Affiliate Program and start earning referral commissions. Thank you.',
+      })
+
+      fetchTickets(currentUser.id, currentUser.email)
+      setActiveTab('messages')
+      setSearchParams({ tab: 'messages' })
+      setPaystackAlert('Your monetization re-invitation request ticket has been submitted to administrators.')
+      setTimeout(() => setPaystackAlert(null), 7000)
+    } catch (err: unknown) {
+      const e = err as Error
+      alert('Failed to submit re-invitation request: ' + e.message)
+    }
+  }
+
+  const handleSubmitPayout = async () => {
+    if (!currentUser || !wallet) return
+    const amt = parseFloat(payoutAmount)
+    if (isNaN(amt) || amt < 1000) {
+      setPayoutModalError('Minimum withdrawal amount is ₦1,000.')
+      return
+    }
+    if (amt > wallet.balance) {
+      setPayoutModalError(`Requested amount exceeds available balance (₦${wallet.balance.toLocaleString()}).`)
+      return
+    }
+    if (!bankName || !accountNumber || !accountName || !bankCode) {
+      setPayoutModalError('Please configure your verified Nigerian bank details in Settings first.')
+      return
+    }
+
+    setRequestingPayout(true)
+    setPayoutModalError(null)
+    try {
+      const nowIso = new Date().toISOString()
+      const ref = `PAYOUT_${currentUser.id.slice(0, 6)}_${Date.now()}`
+
+      const { error: payoutErr } = await supabase.from('payouts').insert({
+        user_id: currentUser.id,
+        amount: amt,
+        bank_name: bankName,
+        bank_code: bankCode,
+        account_number: accountNumber,
+        account_name: accountName,
+        status: 'pending',
+        reference: ref,
+      })
+
+      if (payoutErr) throw payoutErr
+
+      const newBal = Math.max(0, wallet.balance - amt)
+      const newWithdrawn = (wallet.total_withdrawn || 0) + amt
+
+      const { error: wErr } = await supabase
+        .from('wallets')
+        .update({
+          balance: newBal,
+          total_withdrawn: newWithdrawn,
+          updated_at: nowIso,
+        })
+        .eq('user_id', currentUser.id)
+
+      if (wErr) throw wErr
+
+      setWallet((prev) => (prev ? { ...prev, balance: newBal, total_withdrawn: newWithdrawn } : null))
+      setPayoutSuccessMsg(`Withdrawal request for ₦${amt.toLocaleString()} submitted successfully. Our team will process it to your bank account.`)
+      fetchWalletAndMonetization(currentUser.id)
+      setTimeout(() => {
+        setShowPayoutModal(false)
+        setPayoutSuccessMsg(null)
+      }, 3000)
+    } catch (err: unknown) {
+      const e = err as Error
+      setPayoutModalError(e.message || 'Failed to submit withdrawal request.')
+    } finally {
+      setRequestingPayout(false)
+    }
+  }
+
+  const handleCopyReferralLink = () => {
+    if (!referralCode) return
+    const url = `${window.location.origin}/?ref=${referralCode}`
+    navigator.clipboard.writeText(url)
+    setCopiedLink(true)
+    setTimeout(() => setCopiedLink(false), 2500)
   }
 
   useEffect(() => {
@@ -686,13 +1110,22 @@ export const Dashboard: React.FC = () => {
     if (ref && currentUser?.id) {
       const verifyAndUpgrade = async () => {
         try {
+          const nowIso = new Date().toISOString()
           const { error } = await supabase
             .from('profiles')
-            .update({ tier: 'pro', updated_at: new Date().toISOString() })
+            .update({
+              tier: 'pro',
+              is_pro: true,
+              monetization_status: 'invited',
+              monetization_invited_at: nowIso,
+              updated_at: nowIso,
+            })
             .eq('id', currentUser.id)
 
           if (!error) {
             setUserTier('pro')
+            setMonetizationStatus('invited')
+            setShowInviteModal(true)
             setPaystackAlert('🎉 Congratulations! Your payment was verified and JAMBStar Pro lifetime access has been unlocked.')
             setTimeout(() => setPaystackAlert(null), 8000)
             const newParams = new URLSearchParams(searchParams)
@@ -914,6 +1347,33 @@ export const Dashboard: React.FC = () => {
           ) : notices.length > 0 ? (
             <span className="text-[11px] px-2 py-0.5 rounded-full font-mono font-bold bg-emerald-100 text-emerald-800">
               {notices.length}
+            </span>
+          ) : null}
+        </button>
+
+        <button
+          onClick={() => {
+            setActiveTab('monetization')
+            setSearchParams({ tab: 'monetization' })
+            if (currentUser?.id && monetizationStatus === 'active') {
+              fetchWalletAndMonetization(currentUser.id)
+            }
+          }}
+          className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === 'monetization'
+              ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
+              : 'border-transparent text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          <span>💼</span>
+          <span>Affiliate & Earnings</span>
+          {monetizationStatus === 'invited' ? (
+            <span className="text-[11px] px-2 py-0.5 rounded-full font-mono font-bold bg-amber-400 text-slate-950 animate-pulse">
+              Invite!
+            </span>
+          ) : monetizationStatus === 'active' && wallet ? (
+            <span className="text-[11px] px-2 py-0.5 rounded-full font-mono font-bold bg-emerald-100 text-emerald-800">
+              ₦{wallet.balance.toLocaleString()}
             </span>
           ) : null}
         </button>
@@ -1667,6 +2127,427 @@ export const Dashboard: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
+      {/* TAB 4: MONETIZATION & AFFILIATE EARNINGS                                  */}
+      {/* ========================================================================= */}
+      {activeTab === 'monetization' && (
+        <div className="space-y-6">
+          {/* Header Banner */}
+          <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 mb-2">
+                <span>💰</span>
+                <span>Affiliate Earnings Program</span>
+              </div>
+              <h2 className="text-xl sm:text-2xl font-black text-gray-900">
+                Monetization & Payout Center
+              </h2>
+              <p className="text-xs sm:text-sm text-gray-500 mt-1">
+                Earn ₦200 cash reward for every candidate who upgrades to JAMBStar Pro using your unique referral code.
+              </p>
+            </div>
+
+            {monetizationStatus === 'active' && (
+              <button
+                type="button"
+                onClick={() => setShowPayoutModal(true)}
+                disabled={(wallet?.balance || 0) < 1000}
+                className="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 shrink-0"
+              >
+                <span>💳</span>
+                <span>Request Payout</span>
+              </button>
+            )}
+          </div>
+
+          {/* Subview A: Invitation Pending */}
+          {monetizationStatus === 'invited' && (
+            <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 rounded-2xl p-6 sm:p-8 text-white shadow-md space-y-4">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider bg-amber-400 text-slate-950">
+                <span>⭐</span>
+                <span>You're Invited!</span>
+              </div>
+              <h3 className="text-xl sm:text-2xl font-black">
+                Start Earning with the JAMBStar Affiliate Program
+              </h3>
+              <p className="text-emerald-100 text-xs sm:text-sm max-w-2xl leading-relaxed">
+                As a valued member, you are invited to join our affiliate program. Earn ₦200 for every candidate that joins JAMBStar Pro with your referral link. Payouts are credited directly to your verified Nigerian bank account with a minimum withdrawal threshold of ₦1,000 (5 referrals).
+              </p>
+              <div className="flex flex-wrap items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInviteModalStep('invite')
+                    setShowInviteModal(true)
+                  }}
+                  className="px-6 py-3 rounded-xl text-xs sm:text-sm font-bold bg-white text-emerald-800 hover:bg-emerald-50 shadow-md transition-all cursor-pointer"
+                >
+                  Accept Invitation & Setup Bank →
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeclineInvite}
+                  disabled={decliningInvite}
+                  className="px-4 py-3 rounded-xl text-xs font-semibold text-emerald-100 hover:text-white hover:bg-emerald-700/50 transition-colors cursor-pointer"
+                >
+                  Decline for Now
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Subview B: Invitation Declined */}
+          {monetizationStatus === 'declined' && (
+            <div className="bg-white p-6 sm:p-8 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
+              <div className="flex items-start gap-3">
+                <span className="text-2xl">ℹ️</span>
+                <div>
+                  <h3 className="text-base sm:text-lg font-bold text-gray-900">
+                    Affiliate Invitation Declined
+                  </h3>
+                  <p className="text-xs sm:text-sm text-gray-500 mt-1 leading-relaxed">
+                    You previously opted out of the JAMBStar Affiliate Program. If you have changed your mind and would like to start earning ₦200 per referral, you can request a new invitation.
+                  </p>
+                </div>
+              </div>
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={handleRequestReinvitation}
+                  className="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors cursor-pointer flex items-center gap-2"
+                >
+                  <span>📨</span>
+                  <span>Request New Invitation via Support Ticket</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Subview C: None (Free user or uninvited Pro) */}
+          {monetizationStatus === 'none' && (
+            <div className="bg-white p-6 sm:p-8 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
+              {userTier !== 'pro' ? (
+                <>
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl">🔒</span>
+                    <div>
+                      <h3 className="text-base sm:text-lg font-bold text-gray-900">
+                        Pro Affiliate Monetization Program
+                      </h3>
+                      <p className="text-xs sm:text-sm text-gray-500 mt-1 leading-relaxed">
+                        The JAMBStar Affiliate Program is an exclusive benefit for JAMBStar Pro members. Upgrade your account to unlock lifetime Pro CBT practice, unlimited topic drills, and your personal affiliate referral code to earn ₦200 per referral.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowUpgradeModal(true)}
+                      className="px-6 py-3 rounded-xl text-xs sm:text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-colors cursor-pointer"
+                    >
+                      ⭐ Upgrade to JAMBStar Pro (₦1,000)
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl">⏳</span>
+                    <div>
+                      <h3 className="text-base sm:text-lg font-bold text-gray-900">
+                        Affiliate Program Onboarding
+                      </h3>
+                      <p className="text-xs sm:text-sm text-gray-500 mt-1 leading-relaxed">
+                        Your Pro account is eligible for monetization. If you have not yet received your invitation popup, you can submit a quick request ticket to our administrator team.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={handleRequestReinvitation}
+                      className="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors cursor-pointer flex items-center gap-2"
+                    >
+                      <span>📨</span>
+                      <span>Request Monetization Invitation</span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Subview D: Active Affiliate Dashboard */}
+          {monetizationStatus === 'active' && (
+            loadingMonetization ? (
+              <div className="bg-white p-12 text-center rounded-2xl border border-gray-200">
+                <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                <p className="mt-3 text-xs text-gray-500">Loading wallet and affiliate stats...</p>
+              </div>
+            ) : (
+            <>
+              {/* 4 Stat Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold uppercase text-gray-400">
+                    <span>Wallet Balance</span>
+                    <span className="text-lg">💵</span>
+                  </div>
+                  <div className="text-2xl font-black text-gray-900 font-mono">
+                    ₦{(wallet?.balance || 0).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    {(wallet?.balance || 0) >= 1000 ? (
+                      <span className="text-emerald-700 font-bold">✓ Ready for withdrawal</span>
+                    ) : (
+                      <span>₦{(1000 - (wallet?.balance || 0)).toLocaleString()} to min payout</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold uppercase text-gray-400">
+                    <span>Total Earned</span>
+                    <span className="text-lg">📈</span>
+                  </div>
+                  <div className="text-2xl font-black text-emerald-700 font-mono">
+                    ₦{(wallet?.total_earned || 0).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    All-time cumulative commissions
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold uppercase text-gray-400">
+                    <span>Total Withdrawn</span>
+                    <span className="text-lg">🏦</span>
+                  </div>
+                  <div className="text-2xl font-black text-gray-900 font-mono">
+                    ₦{(wallet?.total_withdrawn || 0).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    Successfully transferred to bank
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold uppercase text-gray-400">
+                    <span>Total Referrals</span>
+                    <span className="text-lg">👥</span>
+                  </div>
+                  <div className="text-2xl font-black text-gray-900 font-mono">
+                    {referrals.length}
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    Completed Pro upgrades
+                  </div>
+                </div>
+              </div>
+
+              {/* Referral Link & Bank Summary Grid */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                {/* Left 7 cols: Referral Link & Share Tools */}
+                <div className="lg:col-span-7 bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                      <span>🔗</span>
+                      <span>Your Unique Referral Link</span>
+                    </h3>
+                    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                      ₦200 / referral
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-gray-500">
+                    Share this link with classmates, tutorial groups, or on social media. When someone registers and upgrades to Pro, your wallet is credited instantly.
+                  </p>
+
+                  <div className="space-y-2">
+                    <label className="block text-xs font-bold uppercase text-gray-600">
+                      Referral Link
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value={referralCode ? `${window.location.origin}/?ref=${referralCode}` : 'Generating...'}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-gray-700 text-xs sm:text-sm font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleCopyReferralLink}
+                        className="px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shrink-0 shadow-xs transition-colors cursor-pointer"
+                      >
+                        {copiedLink ? '✓ Copied' : 'Copy Link'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 flex items-center justify-between border-t border-gray-100 text-xs">
+                    <span className="text-gray-500">Referral Code:</span>
+                    <span className="font-mono font-bold text-gray-900 bg-gray-100 px-2.5 py-1 rounded-md">
+                      {referralCode || 'Pending'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Right 5 cols: Bank Account Snapshot */}
+                <div className="lg:col-span-5 bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                      <span>🏦</span>
+                      <span>Payout Account</span>
+                    </h3>
+                    <Link
+                      to="/settings"
+                      className="text-xs font-bold text-emerald-600 hover:text-emerald-700 transition-colors"
+                    >
+                      Manage in Settings →
+                    </Link>
+                  </div>
+
+                  {bankName && accountNumber ? (
+                    <div className="p-4 rounded-xl bg-gray-50 border border-gray-200 space-y-2 text-xs">
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Bank:</span>
+                        <span className="font-bold text-gray-900">{bankName}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Account:</span>
+                        <span className="font-mono font-bold text-gray-900">••••{accountNumber.slice(-4)}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-500">Account Name:</span>
+                        <span className="font-semibold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded text-[11px]">
+                          ✓ {accountName}
+                        </span>
+                      </div>
+                      {bankDetailsUpdatedAt && (
+                        <div className="flex justify-between text-[10px] text-gray-400 pt-1 border-t border-gray-100">
+                          <span>Last Updated:</span>
+                          <span>{new Date(bankDetailsUpdatedAt).toLocaleDateString()}</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs space-y-2">
+                      <div className="font-bold">No payout bank configured</div>
+                      <p className="text-[11px] text-amber-800">
+                        Set up your Nigerian bank details so we can credit your withdrawal requests.
+                      </p>
+                      <Link
+                        to="/settings"
+                        className="inline-block font-bold text-amber-900 underline mt-1"
+                      >
+                        Set Bank Details Now
+                      </Link>
+                    </div>
+                  )}
+
+                  <div className="text-[11px] text-gray-400">
+                    Withdrawal threshold is ₦1,000. Changes to bank details in Settings are protected by a 7-day cooldown.
+                  </div>
+                </div>
+              </div>
+
+              {/* Payout & Referral History Tables */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Payout History */}
+                <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
+                  <h3 className="text-base font-bold text-gray-900 flex items-center justify-between">
+                    <span>Withdrawal History</span>
+                    <span className="text-xs text-gray-400 font-normal">({payouts.length} requests)</span>
+                  </h3>
+
+                  {payouts.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-gray-400 border border-dashed border-gray-200 rounded-xl">
+                      No withdrawal requests yet. Request your first payout once your balance reaches ₦1,000.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
+                      {payouts.map((p) => (
+                        <div key={p.id} className="py-3 flex items-center justify-between text-xs">
+                          <div>
+                            <div className="font-bold text-gray-900 font-mono">
+                              ₦{p.amount.toLocaleString()}
+                            </div>
+                            <div className="text-[11px] text-gray-500 mt-0.5">
+                              {p.bank_name} ••••{p.account_number.slice(-4)}
+                            </div>
+                            <div className="text-[10px] text-gray-400 font-mono">
+                              {new Date(p.created_at).toLocaleDateString('en-GB', {
+                                day: 'numeric',
+                                month: 'short',
+                                year: 'numeric',
+                              })}
+                            </div>
+                          </div>
+                          <div>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                p.status === 'completed'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : p.status === 'rejected'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              {p.status}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Referral History */}
+                <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
+                  <h3 className="text-base font-bold text-gray-900 flex items-center justify-between">
+                    <span>Recent Referrals</span>
+                    <span className="text-xs text-gray-400 font-normal">({referrals.length} completed)</span>
+                  </h3>
+
+                  {referrals.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-gray-400 border border-dashed border-gray-200 rounded-xl">
+                      No referrals yet. Share your referral link to earn ₦200 per Pro upgrade!
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
+                      {referrals.map((r) => (
+                        <div key={r.id} className="py-3 flex items-center justify-between text-xs">
+                          <div>
+                            <div className="font-bold text-emerald-700 font-mono">
+                              +₦{(r.reward_amount || 200).toLocaleString()}
+                            </div>
+                            <div className="text-[11px] text-gray-500">
+                              Candidate Pro Upgrade
+                            </div>
+                            <div className="text-[10px] text-gray-400 font-mono">
+                              {new Date(r.created_at).toLocaleDateString('en-GB', {
+                                day: 'numeric',
+                                month: 'short',
+                                year: 'numeric',
+                              })}
+                            </div>
+                          </div>
+                          <div>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800">
+                              {r.status}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          ))}
+        </div>
+      )}
+
+      {/* ========================================================================= */}
       {/* MODAL: NEW SUPPORT TICKET                                                 */}
       {/* ========================================================================= */}
       {showNewTicketModal && (
@@ -1723,6 +2604,7 @@ export const Dashboard: React.FC = () => {
                   <option value="Exam Inquiry">Exam & Subject Inquiry</option>
                   <option value="Payment">Payment & Subscription</option>
                   <option value="Candidate Support">Candidate Profile & Track Change</option>
+                  <option value="Monetization Re-invitation Request">Monetization Re-invitation Request</option>
                   <option value="General">General Inquiry</option>
                 </select>
               </div>
@@ -1791,6 +2673,356 @@ export const Dashboard: React.FC = () => {
           setShowUpgradeModal(false)
         }}
       />
+
+      {/* Monetization Invitation & Onboarding Modal */}
+      {showInviteModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 space-y-6 shadow-2xl border border-gray-100 relative">
+            <button
+              type="button"
+              onClick={() => setShowInviteModal(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 font-bold text-lg p-1 cursor-pointer"
+            >
+              ✕
+            </button>
+
+            {/* Step 1: Invitation Overview */}
+            {inviteModalStep === 'invite' && (
+              <div className="space-y-5 text-center">
+                <div className="w-16 h-16 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center mx-auto text-3xl shadow-xs">
+                  ⭐
+                </div>
+                <div>
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 mb-2">
+                    Official Invitation
+                  </div>
+                  <h3 className="text-xl sm:text-2xl font-black text-gray-900">
+                    Join JAMBStar Affiliate Program
+                  </h3>
+                  <p className="text-xs sm:text-sm text-gray-600 mt-2 leading-relaxed">
+                    Earn cash rewards while helping fellow UTME candidates prepare with JAMBStar Pro.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-emerald-50/70 border border-emerald-200 text-left space-y-2.5 text-xs text-gray-700">
+                  <div className="flex items-center gap-2">
+                    <span className="text-emerald-700 font-bold">✓</span>
+                    <span><strong>Earn ₦200 per Pro referral:</strong> Instant automated wallet credits for every upgrade.</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-emerald-700 font-bold">✓</span>
+                    <span><strong>₦1,000 Minimum Payout:</strong> Request direct withdrawal to your bank account after just 5 referrals.</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-emerald-700 font-bold">✓</span>
+                    <span><strong>Direct Bank Transfers:</strong> Verified automatic payouts to any Nigerian commercial bank.</span>
+                  </div>
+                </div>
+
+                <div className="space-y-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleAcceptInvite}
+                    disabled={acceptingInvite}
+                    className="w-full py-3.5 px-6 rounded-xl font-black text-sm text-white bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {acceptingInvite ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        <span>Activating Affiliate Account...</span>
+                      </>
+                    ) : (
+                      <span>Accept Invitation & Continue →</span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleDeclineInvite}
+                    disabled={decliningInvite}
+                    className="w-full py-2.5 px-4 rounded-xl text-xs font-semibold text-gray-500 hover:text-gray-800 hover:bg-gray-100 transition-colors cursor-pointer"
+                  >
+                    Decline for Now
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 2: Bank Setup */}
+            {inviteModalStep === 'bank_setup' && (
+              <div className="space-y-4">
+                <div className="text-center">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 mb-2">
+                    Step 2 of 2
+                  </div>
+                  <h3 className="text-xl font-bold text-gray-900">
+                    Setup Payout Bank Details
+                  </h3>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Enter the Nigerian bank account where your referral earnings will be transferred.
+                  </p>
+                </div>
+
+                {modalBankError && (
+                  <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium flex items-center gap-2">
+                    <span>⚠️</span>
+                    <span>{modalBankError}</span>
+                  </div>
+                )}
+
+                <div className="space-y-3 text-xs sm:text-sm">
+                  <div>
+                    <label className="block text-xs font-bold uppercase text-gray-700 mb-1">
+                      Select Bank *
+                    </label>
+                    <select
+                      value={modalBankCode}
+                      onChange={(e) => handleModalBankSelect(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                    >
+                      <option value="">Select your Nigerian Bank</option>
+                      {NIGERIAN_BANKS.map((b) => (
+                        <option key={b.code} value={b.code}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold uppercase text-gray-700 mb-1">
+                      Account Number (10 Digits) *
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        maxLength={10}
+                        value={modalAccountNumber}
+                        onChange={(e) => handleModalAccountNumberChange(e.target.value)}
+                        placeholder="e.g. 0123456789"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                      {modalResolvingBank && (
+                        <div className="absolute right-3 top-2.5 text-xs text-gray-400 flex items-center gap-1.5">
+                          <div className="w-3.5 h-3.5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin"></div>
+                          <span>Verifying...</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-bold uppercase text-gray-700">
+                        Account Name (Paystack Verified)
+                      </label>
+                      {modalAccountNumber.length === 10 && !modalAccountName && !modalResolvingBank && (
+                        <button
+                          type="button"
+                          onClick={handleModalVerify}
+                          className="text-xs font-semibold text-emerald-600 hover:text-emerald-700 underline cursor-pointer"
+                        >
+                          Verify with Paystack
+                        </button>
+                      )}
+                    </div>
+                    <div
+                      className={`p-3 rounded-xl border text-xs flex items-center justify-between ${
+                        modalAccountName
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-900 font-semibold'
+                          : 'bg-gray-50 border-gray-200 text-gray-500'
+                      }`}
+                    >
+                      <span>{modalAccountName || 'Account name will resolve automatically upon entering 10 digits'}</span>
+                      {modalAccountName && (
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-200 text-emerald-800 font-bold uppercase tracking-wider">
+                          Verified
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2 space-y-2">
+                  <button
+                    type="button"
+                    onClick={handleSaveModalBank}
+                    disabled={modalSavingBank || modalResolvingBank || !modalAccountName}
+                    className="w-full py-3 px-6 rounded-xl font-bold text-sm text-white bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {modalSavingBank ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        <span>Saving Bank Details...</span>
+                      </>
+                    ) : (
+                      <span>Save Bank Details & Finish</span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowInviteModal(false)
+                      setPaystackAlert('Affiliate activated! You can configure your payout bank details anytime in Settings.')
+                    }}
+                    className="w-full py-2 px-4 rounded-xl text-xs font-semibold text-gray-500 hover:text-gray-800 hover:bg-gray-100 transition-colors cursor-pointer"
+                  >
+                    Skip for Now (Setup Later in Settings)
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 3: Success Celebration */}
+            {inviteModalStep === 'success' && (
+              <div className="space-y-5 text-center">
+                <div className="w-16 h-16 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto text-3xl shadow-xs">
+                  🎉
+                </div>
+                <div>
+                  <h3 className="text-xl sm:text-2xl font-black text-gray-900">
+                    You're Officially an Affiliate!
+                  </h3>
+                  <p className="text-xs sm:text-sm text-gray-600 mt-1">
+                    Your unique referral link is ready. Start sharing to earn ₦200 per Pro upgrade.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">
+                    Your Referral Code:
+                  </span>
+                  <div className="text-xl font-black font-mono text-gray-900">
+                    {referralCode}
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowInviteModal(false)
+                      setActiveTab('monetization')
+                      setSearchParams({ tab: 'monetization' })
+                      if (currentUser?.id) fetchWalletAndMonetization(currentUser.id)
+                    }}
+                    className="w-full py-3 px-6 rounded-xl font-bold text-sm text-white bg-emerald-600 hover:bg-emerald-700 shadow-md transition-all cursor-pointer"
+                  >
+                    View Affiliate Dashboard →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Payout Request Modal */}
+      {showPayoutModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 space-y-5 shadow-2xl border border-gray-100 relative">
+            <button
+              type="button"
+              onClick={() => {
+                setShowPayoutModal(false)
+                setPayoutModalError(null)
+              }}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 font-bold text-lg p-1 cursor-pointer"
+            >
+              ✕
+            </button>
+
+            <div>
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 mb-2">
+                Withdrawal Request
+              </div>
+              <h3 className="text-xl font-bold text-gray-900">
+                Request Commission Payout
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Available Wallet Balance: <strong className="text-gray-900 font-mono">₦{(wallet?.balance || 0).toLocaleString()}</strong>
+              </p>
+            </div>
+
+            {payoutSuccessMsg && (
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center gap-2">
+                <span>✓</span>
+                <span>{payoutSuccessMsg}</span>
+              </div>
+            )}
+
+            {payoutModalError && (
+              <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium flex items-center gap-2">
+                <span>⚠️</span>
+                <span>{payoutModalError}</span>
+              </div>
+            )}
+
+            <div className="space-y-4 text-xs sm:text-sm">
+              <div>
+                <label className="block text-xs font-bold uppercase text-gray-700 mb-1">
+                  Withdrawal Amount (₦) *
+                </label>
+                <input
+                  type="number"
+                  min={1000}
+                  max={wallet?.balance || 1000}
+                  step={100}
+                  value={payoutAmount}
+                  onChange={(e) => setPayoutAmount(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 font-mono text-base font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <span className="text-[11px] text-gray-400 mt-1 block">
+                  Minimum withdrawal is ₦1,000.
+                </span>
+              </div>
+
+              {/* Destination Bank Snapshot */}
+              <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-1.5 text-xs">
+                <div className="font-bold text-gray-700 uppercase tracking-wider text-[10px]">
+                  Destination Bank Account
+                </div>
+                {bankName && accountNumber ? (
+                  <>
+                    <div className="font-semibold text-gray-900">{bankName}</div>
+                    <div className="font-mono text-gray-600">••••{accountNumber.slice(-4)} ({accountName})</div>
+                  </>
+                ) : (
+                  <div className="text-rose-600 font-medium">
+                    No bank configured. Please configure your bank account in Settings before submitting a payout request.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setShowPayoutModal(false)}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmitPayout}
+                disabled={requestingPayout || !bankName || !accountNumber || (wallet?.balance || 0) < 1000}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+              >
+                {requestingPayout ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    <span>Submitting Request...</span>
+                  </>
+                ) : (
+                  <span>Submit Payout Request</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Monetization AdBanner */}
       <div className="pt-2">

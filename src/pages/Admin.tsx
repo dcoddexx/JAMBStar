@@ -10,10 +10,21 @@ export interface Profile {
   gender?: 'male' | 'female' | null
   role: 'student' | 'admin' | 'super_admin'
   tier?: 'free' | 'pro'
+  is_pro?: boolean
+  monetization_status?: 'none' | 'invited' | 'active' | 'declined'
+  monetization_invited_at?: string | null
+  referral_code?: string | null
+  bank_name?: string | null
+  bank_code?: string | null
+  account_number?: string | null
+  account_name?: string | null
+  bank_details_updated_at?: string | null
   can_post_notices?: boolean
   can_manage_users?: boolean
   can_manage_questions?: boolean
   can_manage_pro?: boolean
+  can_manage_monetization_invites?: boolean
+  can_view_monetization?: boolean
   last_read_notices?: string | null
   created_at: string
 }
@@ -120,7 +131,7 @@ export interface Notice {
   updated_at: string
 }
 
-type AdminTab = 'analytics' | 'questions' | 'support' | 'notices' | 'users' | 'access' | 'settings'
+type AdminTab = 'analytics' | 'questions' | 'support' | 'notices' | 'users' | 'access' | 'settings' | 'monetization'
 
 export const Admin: React.FC = () => {
   // Navigation & Authentication
@@ -135,8 +146,18 @@ export const Admin: React.FC = () => {
     can_manage_users?: boolean
     can_manage_questions?: boolean
     can_manage_pro?: boolean
+    can_manage_monetization_invites?: boolean
+    can_view_monetization?: boolean
   } | null>(null)
   const [loadingUser, setLoadingUser] = useState<boolean>(true)
+
+  // Monetization Tab State
+  const [adminPayouts, setAdminPayouts] = useState<any[]>([])
+  const [adminWallets, setAdminWallets] = useState<any[]>([])
+  const [adminReferrals, setAdminReferrals] = useState<any[]>([])
+  const [loadingAdminMonetization, setLoadingAdminMonetization] = useState<boolean>(false)
+  const [payoutStatusFilter, setPayoutStatusFilter] = useState<'all' | 'pending' | 'completed' | 'rejected'>('all')
+  const [payoutProcessingId, setPayoutProcessingId] = useState<string | null>(null)
 
   // User Management State
   const [profiles, setProfiles] = useState<Profile[]>([])
@@ -264,6 +285,12 @@ export const Admin: React.FC = () => {
   const canManageUsers = isSuperAdmin || currentUser?.can_manage_users !== false
   const canManageQuestions = isSuperAdmin || currentUser?.can_manage_questions !== false
   const canManagePro = isSuperAdmin || currentUser?.can_manage_pro === true
+  const canManageMonetizationInvites = isSuperAdmin || currentUser?.can_manage_monetization_invites === true
+  const canViewMonetization = isSuperAdmin || currentUser?.can_view_monetization === true
+  const adminPendingPayoutsCount = useMemo(
+    () => adminPayouts.filter((p) => p.status === 'pending').length,
+    [adminPayouts]
+  )
 
   // ---------------------------------------------------------------------------
   // Data Fetching
@@ -298,6 +325,8 @@ export const Admin: React.FC = () => {
           can_manage_users: profile?.can_manage_users !== false,
           can_manage_questions: profile?.can_manage_questions !== false,
           can_manage_pro: profile?.can_manage_pro === true,
+          can_manage_monetization_invites: profile?.can_manage_monetization_invites === true,
+          can_view_monetization: profile?.can_view_monetization === true,
         })
       }
     } catch (err) {
@@ -724,7 +753,13 @@ export const Admin: React.FC = () => {
   // ---------------------------------------------------------------------------
   const handleToggleAdminPermission = async (
     adminId: string,
-    permission: 'can_post_notices' | 'can_manage_users' | 'can_manage_questions' | 'can_manage_pro',
+    permission:
+      | 'can_post_notices'
+      | 'can_manage_users'
+      | 'can_manage_questions'
+      | 'can_manage_pro'
+      | 'can_manage_monetization_invites'
+      | 'can_view_monetization',
     currentVal: boolean
   ) => {
     if (!isSuperAdmin) {
@@ -907,9 +942,20 @@ export const Admin: React.FC = () => {
     )
 
     try {
+      const nowIso = new Date().toISOString()
+      const updatePayload =
+        targetTier === 'pro'
+          ? {
+              tier: 'pro',
+              is_pro: true,
+              monetization_status: 'invited',
+              monetization_invited_at: nowIso,
+            }
+          : { tier: 'free', is_pro: false }
+
       const { error } = await supabase
         .from('profiles')
-        .update({ tier: targetTier })
+        .update(updatePayload)
         .eq('id', userId)
 
       if (error) throw error
@@ -973,6 +1019,266 @@ export const Admin: React.FC = () => {
       setProfileActionMsg({ type: 'error', text: `Failed to delete account: ${e.message}` })
     } finally {
       setDeletingUser(false)
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Monetization & Affiliate Management Handlers
+  // ---------------------------------------------------------------------------
+
+  const fetchAdminMonetizationData = async () => {
+    setLoadingAdminMonetization(true)
+    try {
+      const { data: payoutsData } = await supabase
+        .from('payouts')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (payoutsData) setAdminPayouts(payoutsData)
+
+      const { data: walletsData } = await supabase
+        .from('wallets')
+        .select('*')
+        .order('balance', { ascending: false })
+
+      if (walletsData) setAdminWallets(walletsData)
+
+      const { data: referralsData } = await supabase
+        .from('referrals')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (referralsData) setAdminReferrals(referralsData)
+    } catch (err) {
+      console.warn('Error fetching admin monetization data:', err)
+    } finally {
+      setLoadingAdminMonetization(false)
+    }
+  }
+
+  // Super Admin: Bulk Invite All Uninvited Pro Users
+  const handleInviteAllProUsers = async () => {
+    if (!isSuperAdmin && !canManageMonetizationInvites) {
+      setProfileActionMsg({ type: 'error', text: 'Unauthorized: You do not have permission to manage monetization invites.' })
+      return
+    }
+
+    try {
+      const nowIso = new Date().toISOString()
+      const { data, error } = await supabase
+        .from('profiles')
+        .update({
+          monetization_status: 'invited',
+          monetization_invited_at: nowIso,
+          updated_at: nowIso,
+        })
+        .or('tier.eq.pro,is_pro.eq.true')
+        .or('monetization_status.is.null,monetization_status.eq.none')
+        .select('id')
+
+      if (error) throw error
+
+      const count = data ? data.length : 0
+      setProfileActionMsg({
+        type: 'success',
+        text: `Successfully sent monetization invitations to ${count} uninvited Pro candidate(s).`,
+      })
+      setTimeout(() => setProfileActionMsg(null), 5000)
+      fetchProfiles()
+    } catch (err: unknown) {
+      const e = err as Error
+      setProfileActionMsg({ type: 'error', text: `Failed to invite Pro candidates: ${e.message}` })
+    }
+  }
+
+  // Re-issue Monetization Invite for an Individual Candidate
+  const handleReissueMonetizationInvite = async (candidateId: string, candidateName?: string | null) => {
+    if (!canManageMonetizationInvites) {
+      setProfileActionMsg({ type: 'error', text: 'Unauthorized: You do not have permission to manage monetization invites.' })
+      return
+    }
+
+    try {
+      const nowIso = new Date().toISOString()
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          monetization_status: 'invited',
+          monetization_invited_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('id', candidateId)
+
+      if (error) throw error
+
+      setProfiles((prev) =>
+        prev.map((p) =>
+          p.id === candidateId
+            ? { ...p, monetization_status: 'invited', monetization_invited_at: nowIso }
+            : p
+        )
+      )
+
+      setProfileActionMsg({
+        type: 'success',
+        text: `Monetization invitation successfully issued to ${candidateName || 'candidate'}.`,
+      })
+      setTimeout(() => setProfileActionMsg(null), 4000)
+    } catch (err: unknown) {
+      const e = err as Error
+      setProfileActionMsg({ type: 'error', text: `Failed to issue monetization invite: ${e.message}` })
+    }
+  }
+
+  // Support Ticket: Re-issue Monetization Invitation & Resolve Ticket
+  const handleTicketReissueMonetization = async (ticket: SupportTicketWithProfile) => {
+    if (!canManageMonetizationInvites) {
+      alert('Unauthorized: You do not have permission to manage monetization invites.')
+      return
+    }
+
+    const candidateId = ticket.user_id
+    if (!candidateId) {
+      alert('This ticket was submitted by a guest without a candidate account ID.')
+      return
+    }
+
+    try {
+      const nowIso = new Date().toISOString()
+
+      // 1. Update candidate profile to 'invited'
+      const { error: profErr } = await supabase
+        .from('profiles')
+        .update({
+          monetization_status: 'invited',
+          monetization_invited_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('id', candidateId)
+
+      if (profErr) throw profErr
+
+      // 2. Post reply in ticket
+      const replyMsg = 'Hello! Your monetization invitation has been successfully re-issued. You can now accept the invitation from your Dashboard or the Affiliate tab to setup your payout bank details.'
+      await supabase.from('ticket_messages').insert({
+        ticket_id: ticket.id,
+        sender_id: currentUser?.id || null,
+        sender_name: currentUser?.full_name ? `${currentUser.full_name} (Admin)` : 'JAMBStar Support',
+        message: replyMsg,
+      })
+
+      // 3. Resolve ticket
+      await supabase
+        .from('support_tickets')
+        .update({ status: 'resolved', updated_at: nowIso })
+        .eq('id', ticket.id)
+
+      // Refresh ticket messages and ticket list
+      fetchAdminTicketMessages(ticket.id)
+      fetchSupportTickets()
+      fetchProfiles()
+
+      alert('Monetization invitation re-issued and support ticket marked resolved.')
+    } catch (err: unknown) {
+      const e = err as Error
+      alert('Failed to re-issue monetization invitation: ' + e.message)
+    }
+  }
+
+  // Payout Actions
+  const handleApprovePayout = async (payoutId: string) => {
+    setPayoutProcessingId(payoutId)
+    try {
+      const nowIso = new Date().toISOString()
+      const { error } = await supabase
+        .from('payouts')
+        .update({
+          status: 'completed',
+          processed_at: nowIso,
+          processed_by: currentUser?.id || null,
+          updated_at: nowIso,
+        })
+        .eq('id', payoutId)
+
+      if (error) throw error
+
+      setAdminPayouts((prev) =>
+        prev.map((p) =>
+          p.id === payoutId
+            ? { ...p, status: 'completed', processed_at: nowIso }
+            : p
+        )
+      )
+      setProfileActionMsg({ type: 'success', text: 'Payout request marked as completed.' })
+      setTimeout(() => setProfileActionMsg(null), 3000)
+    } catch (err: unknown) {
+      const e = err as Error
+      setProfileActionMsg({ type: 'error', text: `Failed to approve payout: ${e.message}` })
+    } finally {
+      setPayoutProcessingId(null)
+    }
+  }
+
+  const handleRejectPayout = async (payout: any) => {
+    const reason = window.prompt('Please enter a rejection reason (this will be noted on the payout):', 'Account details could not be processed')
+    if (reason === null) return
+
+    setPayoutProcessingId(payout.id)
+    try {
+      const nowIso = new Date().toISOString()
+
+      // 1. Mark payout as rejected
+      const { error: payoutErr } = await supabase
+        .from('payouts')
+        .update({
+          status: 'rejected',
+          notes: reason,
+          processed_at: nowIso,
+          processed_by: currentUser?.id || null,
+          updated_at: nowIso,
+        })
+        .eq('id', payout.id)
+
+      if (payoutErr) throw payoutErr
+
+      // 2. Refund amount to candidate wallet
+      const { data: candWallet } = await supabase
+        .from('wallets')
+        .select('balance, total_withdrawn')
+        .eq('user_id', payout.user_id)
+        .maybeSingle()
+
+      if (candWallet) {
+        const refundedBal = (candWallet.balance || 0) + payout.amount
+        const adjustedWithdrawn = Math.max(0, (candWallet.total_withdrawn || 0) - payout.amount)
+        await supabase
+          .from('wallets')
+          .update({
+            balance: refundedBal,
+            total_withdrawn: adjustedWithdrawn,
+            updated_at: nowIso,
+          })
+          .eq('user_id', payout.user_id)
+      }
+
+      setAdminPayouts((prev) =>
+        prev.map((p) =>
+          p.id === payout.id
+            ? { ...p, status: 'rejected', notes: reason, processed_at: nowIso }
+            : p
+        )
+      )
+      setProfileActionMsg({
+        type: 'success',
+        text: `Payout rejected and ₦${payout.amount.toLocaleString()} refunded to candidate wallet.`,
+      })
+      setTimeout(() => setProfileActionMsg(null), 4000)
+      fetchAdminMonetizationData()
+    } catch (err: unknown) {
+      const e = err as Error
+      setProfileActionMsg({ type: 'error', text: `Failed to reject payout: ${e.message}` })
+    } finally {
+      setPayoutProcessingId(null)
     }
   }
 
@@ -2060,6 +2366,29 @@ export const Admin: React.FC = () => {
             </span>
           )}
         </button>
+
+        {/* Tab 6: Monetization & Payouts (Super Admin & Authorized Staff) */}
+        {canViewMonetization && (
+          <button
+            onClick={() => {
+              setActiveTab('monetization')
+              fetchAdminMonetizationData()
+            }}
+            className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+              activeTab === 'monetization'
+                ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
+                : 'border-transparent text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            <span>💰</span>
+            <span>Monetization & Payouts</span>
+            {adminPendingPayoutsCount > 0 && (
+              <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-amber-500 text-white font-bold font-mono animate-pulse">
+                {adminPendingPayoutsCount}
+              </span>
+            )}
+          </button>
+        )}
       </div>
 
       {/* ======================================================================= */}
@@ -2808,6 +3137,18 @@ export const Admin: React.FC = () => {
                               <span>↺ Reopen Ticket</span>
                             )}
                           </button>
+
+                          {canManageMonetizationInvites && selectedAdminTicket.user_id && (
+                            <button
+                              type="button"
+                              onClick={() => handleTicketReissueMonetization(selectedAdminTicket)}
+                              className="px-3 py-1 rounded-lg text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white shadow-2xs transition-all cursor-pointer flex items-center gap-1.5"
+                              title="Re-issue monetization invitation to this candidate and resolve ticket"
+                            >
+                              <span>⭐</span>
+                              <span>Re-issue Monetization Invite</span>
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -3298,6 +3639,18 @@ export const Admin: React.FC = () => {
                   >
                     ↻ Refresh
                   </button>
+
+                  {canManageMonetizationInvites && (
+                    <button
+                      type="button"
+                      onClick={handleInviteAllProUsers}
+                      className="px-3.5 py-1.5 rounded-lg text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                      title="Bulk send affiliate monetization invitations to all uninvited Pro candidates"
+                    >
+                      <span>⭐</span>
+                      <span>Invite All Uninvited Pro Users</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -3322,6 +3675,7 @@ export const Admin: React.FC = () => {
                           <th className="py-3 px-4">Candidate Profile</th>
                           <th className="py-3 px-4">Track</th>
                           <th className="py-3 px-4">Tier</th>
+                          <th className="py-3 px-4">Monetization</th>
                           <th className="py-3 px-4">Current Role</th>
                           <th className="py-3 px-4">Role Switcher</th>
                           <th className="py-3 px-4 text-right">Account Actions</th>
@@ -3378,6 +3732,27 @@ export const Admin: React.FC = () => {
                                   <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
                                     Free
                                   </span>
+                                )}
+                              </td>
+
+                              {/* Monetization Status */}
+                              <td className="py-3.5 px-4">
+                                {p.monetization_status === 'active' ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
+                                    <span>✓</span>
+                                    <span>Active</span>
+                                  </span>
+                                ) : p.monetization_status === 'invited' ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800">
+                                    <span>⏳</span>
+                                    <span>Invited</span>
+                                  </span>
+                                ) : p.monetization_status === 'declined' ? (
+                                  <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-100 text-rose-800">
+                                    Declined
+                                  </span>
+                                ) : (
+                                  <span className="text-xs text-gray-400">None</span>
                                 )}
                               </td>
 
@@ -3449,6 +3824,19 @@ export const Admin: React.FC = () => {
                                         <span>⭐ Grant Pro</span>
                                       </button>
                                     )
+                                  )}
+
+                                  {/* Monetization Invite Action */}
+                                  {canManageMonetizationInvites && !isSelf && (p.tier === 'pro' || p.is_pro === true) && p.monetization_status !== 'active' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleReissueMonetizationInvite(p.id, p.full_name)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors cursor-pointer"
+                                      title="Send / Re-issue Monetization Invite"
+                                    >
+                                      <span>⭐</span>
+                                      <span>{p.monetization_status === 'declined' || p.monetization_status === 'invited' ? 'Re-invite' : 'Invite'}</span>
+                                    </button>
                                   )}
 
                                   {!isSelf && (
@@ -3556,6 +3944,8 @@ export const Admin: React.FC = () => {
                           <th className="py-3.5 px-4 text-center">Manage Users</th>
                           <th className="py-3.5 px-4 text-center">Manage Questions</th>
                           <th className="py-3.5 px-4 text-center">Manage Pro Tier</th>
+                          <th className="py-3.5 px-4 text-center">View Monetization</th>
+                          <th className="py-3.5 px-4 text-center">Manage Invites</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -3566,6 +3956,8 @@ export const Admin: React.FC = () => {
                             const canUsers = adm.can_manage_users !== false
                             const canQuestions = adm.can_manage_questions !== false
                             const canPro = adm.can_manage_pro === true
+                            const canViewMonet = adm.can_view_monetization === true
+                            const canManageInvites = adm.can_manage_monetization_invites === true
 
                             return (
                               <tr key={adm.id} className="hover:bg-gray-50/70 transition-colors">
@@ -3678,6 +4070,58 @@ export const Admin: React.FC = () => {
                                   </button>
                                   <span className="block text-[10px] text-gray-500 mt-0.5 font-medium">
                                     {canPro ? '⭐ Authorized' : 'Restricted'}
+                                  </span>
+                                </td>
+
+                                {/* Toggle: View Monetization */}
+                                <td className="py-4 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleToggleAdminPermission(
+                                        adm.id,
+                                        'can_view_monetization',
+                                        canViewMonet
+                                      )
+                                    }
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 ${
+                                      canViewMonet ? 'bg-emerald-600' : 'bg-gray-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                        canViewMonet ? 'translate-x-6' : 'translate-x-1'
+                                      }`}
+                                    />
+                                  </button>
+                                  <span className="block text-[10px] text-gray-500 mt-0.5">
+                                    {canViewMonet ? 'Allowed' : 'Restricted'}
+                                  </span>
+                                </td>
+
+                                {/* Toggle: Manage Monetization Invites */}
+                                <td className="py-4 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleToggleAdminPermission(
+                                        adm.id,
+                                        'can_manage_monetization_invites',
+                                        canManageInvites
+                                      )
+                                    }
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 ${
+                                      canManageInvites ? 'bg-purple-600' : 'bg-gray-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                        canManageInvites ? 'translate-x-6' : 'translate-x-1'
+                                      }`}
+                                    />
+                                  </button>
+                                  <span className="block text-[10px] text-gray-500 mt-0.5">
+                                    {canManageInvites ? 'Allowed' : 'Restricted'}
                                   </span>
                                 </td>
                               </tr>
@@ -3819,6 +4263,339 @@ export const Admin: React.FC = () => {
                 </div>
               </form>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* SECTION 5: MONETIZATION & PAYOUT MANAGEMENT (Super Admin & Auth Staff)   */}
+      {/* ======================================================================= */}
+      {activeTab === 'monetization' && (
+        <div className="space-y-6">
+          {!canViewMonetization ? (
+            <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 shadow-sm space-y-3">
+              <span className="text-4xl">🔒</span>
+              <h2 className="text-xl font-extrabold text-gray-900">
+                Monetization Access Restricted
+              </h2>
+              <p className="text-sm text-gray-500 max-w-md mx-auto">
+                You do not have permission to view affiliate monetization metrics or process candidate payouts. Contact a Super Admin to request access.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Header Banner */}
+              <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 mb-2">
+                    <span>💰</span>
+                    <span>Affiliate & Payout Management</span>
+                  </div>
+                  <h2 className="text-xl sm:text-2xl font-black text-gray-900">
+                    Candidate Monetization Center
+                  </h2>
+                  <p className="text-xs sm:text-sm text-gray-500 mt-1">
+                    Manage affiliate program invitations, approve candidate withdrawals, and track commission rewards.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={fetchAdminMonetizationData}
+                    disabled={loadingAdminMonetization}
+                    className="px-3.5 py-2 border border-gray-300 rounded-xl text-xs font-bold text-gray-700 hover:bg-gray-50 cursor-pointer flex items-center gap-1.5"
+                  >
+                    <span className={loadingAdminMonetization ? 'animate-spin' : ''}>↻</span>
+                    <span>Refresh</span>
+                  </button>
+
+                  {canManageMonetizationInvites && (
+                    <button
+                      type="button"
+                      onClick={handleInviteAllProUsers}
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                      title="Bulk send affiliate monetization invitations to all uninvited Pro candidates"
+                    >
+                      <span>⭐</span>
+                      <span>Invite All Uninvited Pro Users</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* 4 Monetization Stat Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold uppercase text-gray-400">
+                    <span>Pending Withdrawals</span>
+                    <span className="text-lg">⏳</span>
+                  </div>
+                  <div className="text-2xl font-black text-amber-600 font-mono">
+                    {adminPendingPayoutsCount} Requests
+                  </div>
+                  <div className="text-[11px] text-gray-500 font-mono">
+                    Sum: ₦{adminPayouts
+                      .filter((p) => p.status === 'pending')
+                      .reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+                      .toLocaleString()}
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold uppercase text-gray-400">
+                    <span>Total Paid Out</span>
+                    <span className="text-lg">🏦</span>
+                  </div>
+                  <div className="text-2xl font-black text-gray-900 font-mono">
+                    ₦{adminPayouts
+                      .filter((p) => p.status === 'completed')
+                      .reduce((sum, p) => sum + (Number(p.amount) || 0), 0)
+                      .toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    {adminPayouts.filter((p) => p.status === 'completed').length} completed payouts
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold uppercase text-gray-400">
+                    <span>Active Affiliates</span>
+                    <span className="text-lg">👥</span>
+                  </div>
+                  <div className="text-2xl font-black text-emerald-700 font-mono">
+                    {profiles.filter((p) => p.monetization_status === 'active').length} Candidates
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    {profiles.filter((p) => p.monetization_status === 'invited').length} pending invitations
+                  </div>
+                </div>
+
+                <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold uppercase text-gray-400">
+                    <span>Total Commissions</span>
+                    <span className="text-lg">📈</span>
+                  </div>
+                  <div className="text-2xl font-black text-gray-900 font-mono">
+                    ₦{adminReferrals
+                      .reduce((sum, r) => sum + (Number(r.reward_amount) || 200), 0)
+                      .toLocaleString()}
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    {adminReferrals.length} successful referrals
+                  </div>
+                </div>
+              </div>
+
+              {/* Payout Requests Queue Table */}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden space-y-4 p-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
+                  <div>
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900">
+                      Payout Requests Queue
+                    </h3>
+                    <p className="text-xs text-gray-500">
+                      Process candidate commission withdrawals. Approving marks the transfer as completed. Rejecting refunds the candidate wallet.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="font-semibold text-gray-500">Status:</span>
+                    <select
+                      value={payoutStatusFilter}
+                      onChange={(e) => setPayoutStatusFilter(e.target.value as any)}
+                      className="px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="all">All Payouts ({adminPayouts.length})</option>
+                      <option value="pending">Pending ({adminPendingPayoutsCount})</option>
+                      <option value="completed">Completed</option>
+                      <option value="rejected">Rejected</option>
+                    </select>
+                  </div>
+                </div>
+
+                {loadingAdminMonetization ? (
+                  <div className="p-12 text-center">
+                    <div className="w-8 h-8 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                    <p className="mt-3 text-xs text-gray-500">Loading payout records...</p>
+                  </div>
+                ) : adminPayouts.length === 0 ? (
+                  <div className="p-12 text-center text-xs text-gray-400">
+                    No payout records found in database.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs sm:text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[11px]">
+                        <tr>
+                          <th className="py-3 px-4">Candidate</th>
+                          <th className="py-3 px-4">Amount</th>
+                          <th className="py-3 px-4">Bank Details</th>
+                          <th className="py-3 px-4">Date</th>
+                          <th className="py-3 px-4">Status</th>
+                          <th className="py-3 px-4 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {adminPayouts
+                          .filter((p) => payoutStatusFilter === 'all' || p.status === payoutStatusFilter)
+                          .map((payout) => {
+                            const candidate = profiles.find((prof) => prof.id === payout.user_id)
+                            return (
+                              <tr key={payout.id} className="hover:bg-gray-50/70 transition-colors">
+                                <td className="py-3 px-4">
+                                  <div className="font-semibold text-gray-900">
+                                    {candidate?.full_name || 'Candidate'}
+                                  </div>
+                                  <div className="text-[11px] font-mono text-gray-400">
+                                    ID: {payout.user_id.slice(0, 8)}...
+                                  </div>
+                                </td>
+
+                                <td className="py-3 px-4 font-black font-mono text-gray-900 text-sm">
+                                  ₦{Number(payout.amount).toLocaleString()}
+                                </td>
+
+                                <td className="py-3 px-4">
+                                  <div className="font-semibold text-gray-800">{payout.bank_name}</div>
+                                  <div className="font-mono text-[11px] text-gray-600">
+                                    {payout.account_number} ({payout.account_name})
+                                  </div>
+                                </td>
+
+                                <td className="py-3 px-4 text-xs font-mono text-gray-500">
+                                  {new Date(payout.created_at).toLocaleDateString('en-GB', {
+                                    day: 'numeric',
+                                    month: 'short',
+                                    year: 'numeric',
+                                  })}
+                                </td>
+
+                                <td className="py-3 px-4">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                      payout.status === 'completed'
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : payout.status === 'rejected'
+                                        ? 'bg-rose-100 text-rose-800'
+                                        : 'bg-amber-100 text-amber-800'
+                                    }`}
+                                  >
+                                    {payout.status}
+                                  </span>
+                                </td>
+
+                                <td className="py-3 px-4 text-right">
+                                  {payout.status === 'pending' ? (
+                                    <div className="flex items-center justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        disabled={payoutProcessingId === payout.id}
+                                        onClick={() => handleApprovePayout(payout.id)}
+                                        className="px-3 py-1 rounded-lg text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors cursor-pointer disabled:opacity-50"
+                                      >
+                                        Approve
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={payoutProcessingId === payout.id}
+                                        onClick={() => handleRejectPayout(payout)}
+                                        className="px-2.5 py-1 rounded-lg text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition-colors cursor-pointer disabled:opacity-50"
+                                      >
+                                        Reject
+                                      </button>
+                                    </div>
+                                  ) : payout.notes ? (
+                                    <span className="text-[11px] text-gray-400 italic" title={payout.notes}>
+                                      Note: {payout.notes}
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs text-gray-400">Processed</span>
+                                  )}
+                                </td>
+                              </tr>
+                            )
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Active Affiliates & Wallets Overview */}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden space-y-4 p-6">
+                <div className="border-b border-gray-100 pb-3">
+                  <h3 className="text-base sm:text-lg font-bold text-gray-900">
+                    Affiliate Wallets & Referral Balances
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Live balance snapshot of registered candidates in the affiliate program.
+                  </p>
+                </div>
+
+                {adminWallets.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-gray-400">
+                    No active affiliate wallets initialized yet.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs sm:text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[11px]">
+                        <tr>
+                          <th className="py-3 px-4">Affiliate Candidate</th>
+                          <th className="py-3 px-4">Referral Code</th>
+                          <th className="py-3 px-4">Available Balance</th>
+                          <th className="py-3 px-4">Total Earned</th>
+                          <th className="py-3 px-4">Total Withdrawn</th>
+                          <th className="py-3 px-4">Bank Account</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {adminWallets.map((w) => {
+                          const candidate = profiles.find((prof) => prof.id === w.user_id)
+                          return (
+                            <tr key={w.id} className="hover:bg-gray-50/70 transition-colors">
+                              <td className="py-3 px-4">
+                                <div className="font-semibold text-gray-900">
+                                  {candidate?.full_name || 'Candidate'}
+                                </div>
+                                <div className="text-[11px] font-mono text-gray-400">
+                                  ID: {w.user_id.slice(0, 8)}...
+                                </div>
+                              </td>
+
+                              <td className="py-3 px-4 font-mono font-bold text-gray-800">
+                                {candidate?.referral_code || 'Pending'}
+                              </td>
+
+                              <td className="py-3 px-4 font-mono font-bold text-emerald-700">
+                                ₦{Number(w.balance || 0).toLocaleString()}
+                              </td>
+
+                              <td className="py-3 px-4 font-mono text-gray-700">
+                                ₦{Number(w.total_earned || 0).toLocaleString()}
+                              </td>
+
+                              <td className="py-3 px-4 font-mono text-gray-500">
+                                ₦{Number(w.total_withdrawn || 0).toLocaleString()}
+                              </td>
+
+                              <td className="py-3 px-4 text-xs text-gray-600">
+                                {candidate?.bank_name ? (
+                                  <span>{candidate.bank_name} (••••{candidate.account_number?.slice(-4)})</span>
+                                ) : (
+                                  <span className="text-gray-400 italic">Not set</span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </div>
       )}

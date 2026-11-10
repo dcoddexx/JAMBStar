@@ -259,6 +259,14 @@ const App: React.FC = () => {
                 </AdminRoute>
               }
             />
+            <Route
+              path="/admin-portal"
+              element={
+                <AdminRoute user={user} role={role} loading={authLoading}>
+                  <Admin />
+                </AdminRoute>
+              }
+            />
 
             {/* Google AdSense Compliance & Legal Pages */}
             <Route path="/privacy" element={<PrivacyPolicy />} />

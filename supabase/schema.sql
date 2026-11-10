@@ -21,11 +21,22 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     track TEXT NOT NULL CHECK (track IN ('Science', 'Arts', 'Commercial')),
     gender TEXT NOT NULL DEFAULT 'male' CHECK (gender IN ('male', 'female')),
     tier TEXT NOT NULL DEFAULT 'free' CHECK (tier IN ('free', 'pro')),
+    is_pro BOOLEAN NOT NULL DEFAULT false,
     role TEXT NOT NULL DEFAULT 'student' CHECK (role IN ('student', 'admin', 'super_admin')),
     can_post_notices BOOLEAN NOT NULL DEFAULT true,
     can_manage_users BOOLEAN NOT NULL DEFAULT true,
     can_manage_questions BOOLEAN NOT NULL DEFAULT true,
     can_manage_pro BOOLEAN NOT NULL DEFAULT false,
+    can_manage_monetization_invites BOOLEAN NOT NULL DEFAULT false,
+    can_view_monetization BOOLEAN NOT NULL DEFAULT false,
+    monetization_status TEXT NOT NULL DEFAULT 'none' CHECK (monetization_status IN ('none', 'invited', 'active', 'declined')),
+    monetization_invited_at TIMESTAMPTZ,
+    referral_code TEXT UNIQUE,
+    bank_name TEXT,
+    bank_code TEXT,
+    account_number TEXT,
+    account_name TEXT,
+    bank_details_updated_at TIMESTAMPTZ,
     last_read_notices TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
@@ -38,10 +49,23 @@ UPDATE public.profiles SET gender = 'male' WHERE gender IS NULL;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS tier TEXT DEFAULT 'free' CHECK (tier IN ('free', 'pro'));
 UPDATE public.profiles SET tier = 'free' WHERE tier IS NULL;
 
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS is_pro BOOLEAN NOT NULL DEFAULT false;
+UPDATE public.profiles SET is_pro = true WHERE tier = 'pro';
+
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_post_notices BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_users BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_questions BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_pro BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_monetization_invites BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_view_monetization BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS monetization_status TEXT NOT NULL DEFAULT 'none' CHECK (monetization_status IN ('none', 'invited', 'active', 'declined'));
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS monetization_invited_at TIMESTAMPTZ;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS bank_name TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS bank_code TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS account_number TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS account_name TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS bank_details_updated_at TIMESTAMPTZ;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS last_read_notices TIMESTAMPTZ;
 
 COMMENT ON TABLE public.profiles IS 'Student and admin profiles linked to auth.users.';
@@ -162,7 +186,7 @@ CREATE TABLE IF NOT EXISTS public.support_tickets (
     guest_name TEXT,
     guest_email TEXT,
     subject TEXT NOT NULL,
-    category TEXT NOT NULL CHECK (category IN ('Technical', 'Payment', 'Exam Inquiry', 'General', 'Question Bank Feedback', 'Candidate Support', 'Direct Message', 'Other')),
+    category TEXT NOT NULL CHECK (category IN ('Technical', 'Payment', 'Exam Inquiry', 'General', 'Question Bank Feedback', 'Candidate Support', 'Direct Message', 'Monetization Re-invitation Request', 'Other')),
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
@@ -217,6 +241,60 @@ CREATE TABLE IF NOT EXISTS public.notices (
 );
 
 COMMENT ON TABLE public.notices IS 'Global platform notices and announcements posted by administrators.';
+
+-- ------------------------------------------------------------------------------
+-- Table: wallets
+-- Tracks candidate affiliate earnings and balances from Pro referrals
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.wallets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES public.profiles(id) ON DELETE CASCADE,
+    balance NUMERIC(12, 2) NOT NULL DEFAULT 0.00 CHECK (balance >= 0),
+    total_earned NUMERIC(12, 2) NOT NULL DEFAULT 0.00 CHECK (total_earned >= 0),
+    total_withdrawn NUMERIC(12, 2) NOT NULL DEFAULT 0.00 CHECK (total_withdrawn >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+COMMENT ON TABLE public.wallets IS 'Affiliate wallet balances and earnings ledger.';
+
+-- ------------------------------------------------------------------------------
+-- Table: referrals
+-- Records successful Pro tier candidate referrals credited to an affiliate
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.referrals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    referrer_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    referred_id UUID NOT NULL UNIQUE REFERENCES public.profiles(id) ON DELETE CASCADE,
+    reward_amount NUMERIC(12, 2) NOT NULL DEFAULT 200.00 CHECK (reward_amount >= 0),
+    status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'cancelled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+COMMENT ON TABLE public.referrals IS 'Referral transactions rewarding ₦200 per Pro upgrade.';
+
+-- ------------------------------------------------------------------------------
+-- Table: payouts
+-- Tracks affiliate withdrawal requests and bank settlement history
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.payouts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    amount NUMERIC(12, 2) NOT NULL CHECK (amount >= 1000.00),
+    bank_name TEXT NOT NULL,
+    bank_code TEXT NOT NULL,
+    account_number TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'rejected')),
+    reference TEXT UNIQUE,
+    processed_at TIMESTAMPTZ,
+    processed_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+COMMENT ON TABLE public.payouts IS 'Affiliate withdrawal requests and settlement records.';
 
 -- ==============================================================================
 -- 3. INDEXES FOR PERFORMANCE
@@ -594,6 +672,79 @@ CREATE POLICY "Admins can delete notices"
     FOR DELETE
     TO authenticated
     USING (public.is_admin(auth.uid()));
+
+-- ------------------------------------------------------------------------------
+-- RLS: wallets
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.wallets ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view own wallet" ON public.wallets;
+CREATE POLICY "Users can view own wallet"
+    ON public.wallets
+    FOR SELECT
+    TO authenticated
+    USING (auth.uid() = user_id OR public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "Users can insert own wallet" ON public.wallets;
+CREATE POLICY "Users can insert own wallet"
+    ON public.wallets
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (auth.uid() = user_id OR public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "Users and admins can update wallets" ON public.wallets;
+CREATE POLICY "Users and admins can update wallets"
+    ON public.wallets
+    FOR UPDATE
+    TO authenticated
+    USING (auth.uid() = user_id OR public.is_admin(auth.uid()))
+    WITH CHECK (auth.uid() = user_id OR public.is_admin(auth.uid()));
+
+-- ------------------------------------------------------------------------------
+-- RLS: referrals
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.referrals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view own referrals as referrer" ON public.referrals;
+CREATE POLICY "Users can view own referrals as referrer"
+    ON public.referrals
+    FOR SELECT
+    TO authenticated
+    USING (auth.uid() = referrer_id OR public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "System and users can insert referrals" ON public.referrals;
+CREATE POLICY "System and users can insert referrals"
+    ON public.referrals
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (auth.uid() = referred_id OR auth.uid() = referrer_id OR public.is_admin(auth.uid()));
+
+-- ------------------------------------------------------------------------------
+-- RLS: payouts
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.payouts ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view own payouts" ON public.payouts;
+CREATE POLICY "Users can view own payouts"
+    ON public.payouts
+    FOR SELECT
+    TO authenticated
+    USING (auth.uid() = user_id OR public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "Users can insert own payout requests" ON public.payouts;
+CREATE POLICY "Users can insert own payout requests"
+    ON public.payouts
+    FOR INSERT
+    TO authenticated
+    WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Admins can update payouts" ON public.payouts;
+CREATE POLICY "Admins can update payouts"
+    ON public.payouts
+    FOR UPDATE
+    TO authenticated
+    USING (public.is_admin(auth.uid()))
+    WITH CHECK (public.is_admin(auth.uid()));
 
 -- ==============================================================================
 -- 6. AUTOMATED PROFILE CREATION ON SIGNUP

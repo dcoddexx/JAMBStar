@@ -17,11 +17,22 @@ export interface Database {
           track: 'Science' | 'Arts' | 'Commercial'
           gender: 'male' | 'female'
           tier: 'free' | 'pro'
+          is_pro: boolean
           role: 'student' | 'admin' | 'super_admin'
           can_post_notices: boolean
           can_manage_users: boolean
           can_manage_questions: boolean
           can_manage_pro?: boolean
+          can_manage_monetization_invites?: boolean
+          can_view_monetization?: boolean
+          monetization_status: 'none' | 'invited' | 'active' | 'declined'
+          monetization_invited_at: string | null
+          referral_code: string | null
+          bank_name: string | null
+          bank_code: string | null
+          account_number: string | null
+          account_name: string | null
+          bank_details_updated_at: string | null
           last_read_notices: string | null
           created_at: string
           updated_at: string
@@ -33,11 +44,22 @@ export interface Database {
           track: 'Science' | 'Arts' | 'Commercial'
           gender?: 'male' | 'female'
           tier?: 'free' | 'pro'
+          is_pro?: boolean
           role?: 'student' | 'admin' | 'super_admin'
           can_post_notices?: boolean
           can_manage_users?: boolean
           can_manage_questions?: boolean
           can_manage_pro?: boolean
+          can_manage_monetization_invites?: boolean
+          can_view_monetization?: boolean
+          monetization_status?: 'none' | 'invited' | 'active' | 'declined'
+          monetization_invited_at?: string | null
+          referral_code?: string | null
+          bank_name?: string | null
+          bank_code?: string | null
+          account_number?: string | null
+          account_name?: string | null
+          bank_details_updated_at?: string | null
           last_read_notices?: string | null
           created_at?: string
           updated_at?: string
@@ -49,11 +71,22 @@ export interface Database {
           track?: 'Science' | 'Arts' | 'Commercial'
           gender?: 'male' | 'female'
           tier?: 'free' | 'pro'
+          is_pro?: boolean
           role?: 'student' | 'admin' | 'super_admin'
           can_post_notices?: boolean
           can_manage_users?: boolean
           can_manage_questions?: boolean
           can_manage_pro?: boolean
+          can_manage_monetization_invites?: boolean
+          can_view_monetization?: boolean
+          monetization_status?: 'none' | 'invited' | 'active' | 'declined'
+          monetization_invited_at?: string | null
+          referral_code?: string | null
+          bank_name?: string | null
+          bank_code?: string | null
+          account_number?: string | null
+          account_name?: string | null
+          bank_details_updated_at?: string | null
           last_read_notices?: string | null
           created_at?: string
           updated_at?: string
@@ -305,6 +338,111 @@ export interface Database {
           title?: string
           content?: string
           created_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+      }
+      wallets: {
+        Row: {
+          id: string
+          user_id: string
+          balance: number
+          total_earned: number
+          total_withdrawn: number
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          balance?: number
+          total_earned?: number
+          total_withdrawn?: number
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          balance?: number
+          total_earned?: number
+          total_withdrawn?: number
+          created_at?: string
+          updated_at?: string
+        }
+      }
+      referrals: {
+        Row: {
+          id: string
+          referrer_id: string
+          referred_id: string
+          reward_amount: number
+          status: 'pending' | 'completed' | 'cancelled'
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          referrer_id: string
+          referred_id: string
+          reward_amount?: number
+          status?: 'pending' | 'completed' | 'cancelled'
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          referrer_id?: string
+          referred_id?: string
+          reward_amount?: number
+          status?: 'pending' | 'completed' | 'cancelled'
+          created_at?: string
+        }
+      }
+      payouts: {
+        Row: {
+          id: string
+          user_id: string
+          amount: number
+          bank_name: string
+          bank_code: string
+          account_number: string
+          account_name: string
+          status: 'pending' | 'processing' | 'completed' | 'rejected'
+          reference: string | null
+          processed_at: string | null
+          processed_by: string | null
+          notes: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          amount: number
+          bank_name: string
+          bank_code: string
+          account_number: string
+          account_name: string
+          status?: 'pending' | 'processing' | 'completed' | 'rejected'
+          reference?: string | null
+          processed_at?: string | null
+          processed_by?: string | null
+          notes?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          amount?: number
+          bank_name?: string
+          bank_code?: string
+          account_number?: string
+          account_name?: string
+          status?: 'pending' | 'processing' | 'completed' | 'rejected'
+          reference?: string | null
+          processed_at?: string | null
+          processed_by?: string | null
+          notes?: string | null
           created_at?: string
           updated_at?: string
         }

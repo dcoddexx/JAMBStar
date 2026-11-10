@@ -24,9 +24,7 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
   // Paystack configuration
-  const paystackPublicKey =
-    import.meta.env.VITE_PAYSTACK_PUBLIC_KEY ||
-    'pk_live_171d4fc8da421692b293f1b2502a324dc76a61d7'
+  const paystackPublicKey = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || ''
 
   const paystackConfig = {
     reference: `JAMBSTAR_PRO_${user?.id ? user.id.slice(0, 8) : 'GUEST'}_${Date.now()}`,
@@ -70,10 +68,15 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
     setErrorMessage(null)
 
     try {
-      // Update candidate's profile tier to 'pro' in Supabase
+      // Update candidate's profile tier to 'pro' and trigger monetization invite in Supabase
       const { error } = await supabase
         .from('profiles')
-        .update({ tier: 'pro' })
+        .update({
+          tier: 'pro',
+          is_pro: true,
+          monetization_status: 'invited',
+          monetization_invited_at: new Date().toISOString()
+        })
         .eq('id', user.id)
 
       if (error) throw error
