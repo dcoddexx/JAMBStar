@@ -185,6 +185,7 @@ export const Dashboard: React.FC = () => {
   // Tier and Upgrade Modal State
   const [userTier, setUserTier] = useState<'free' | 'pro'>('free')
   const [showUpgradeModal, setShowUpgradeModal] = useState<boolean>(false)
+  const [upgradeReasonMessage, setUpgradeReasonMessage] = useState<string | null>(null)
 
   // CBT Pre-Exam Setup Modal State
   const [showPreExamModal, setShowPreExamModal] = useState<boolean>(false)
@@ -892,8 +893,18 @@ export const Dashboard: React.FC = () => {
     fetchNotices()
   }, [])
 
-  // Handle ?setup=true and ?tab= triggers from Navbar or external links
+  // Handle ?setup=true, ?upgradeNotice=topic_drill, and ?tab= triggers from Navbar or external links
   useEffect(() => {
+    if (searchParams.get('upgradeNotice') === 'topic_drill') {
+      setUpgradeReasonMessage(
+        'Topic Practice Drills are exclusive to Pro members. Upgrade to Pro for ₦1,000 to unlock targeted subject practice.'
+      )
+      setShowUpgradeModal(true)
+      const newParams = new URLSearchParams(searchParams)
+      newParams.delete('upgradeNotice')
+      setSearchParams(newParams, { replace: true })
+    }
+
     if (searchParams.get('setup') === 'true') {
       setShowPreExamModal(true)
       const newParams = new URLSearchParams(searchParams)
@@ -1159,6 +1170,15 @@ export const Dashboard: React.FC = () => {
       isUntimed: boolean
     }
   ) => {
+    if (drillConfig?.isTopicDrill && userTier !== 'pro') {
+      setShowPreExamModal(false)
+      setUpgradeReasonMessage(
+        'Topic Practice Drills are exclusive to Pro members. Upgrade to Pro for ₦1,000 to unlock targeted subject practice.'
+      )
+      setShowUpgradeModal(true)
+      return
+    }
+
     // Clear any previous active CBT session when launching a new exam
     try {
       localStorage.removeItem('jambstar_active_cbt_session')
@@ -1217,6 +1237,13 @@ export const Dashboard: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             onClick={() => {
+              if (userTier !== 'pro') {
+                setUpgradeReasonMessage(
+                  'Topic Practice Drills are exclusive to Pro members. Upgrade to Pro for ₦1,000 to unlock targeted subject practice.'
+                )
+                setShowUpgradeModal(true)
+                return
+              }
               setPreExamInitialMode('drill')
               setShowPreExamModal(true)
             }}
@@ -1717,6 +1744,13 @@ export const Dashboard: React.FC = () => {
           <div className="flex flex-col sm:flex-row items-center gap-2.5 w-full sm:w-auto">
             <button
               onClick={() => {
+                if (userTier !== 'pro') {
+                  setUpgradeReasonMessage(
+                    'Topic Practice Drills are exclusive to Pro members. Upgrade to Pro for ₦1,000 to unlock targeted subject practice.'
+                  )
+                  setShowUpgradeModal(true)
+                  return
+                }
                 setPreExamInitialMode('drill')
                 setShowPreExamModal(true)
               }}
@@ -2551,8 +2585,8 @@ export const Dashboard: React.FC = () => {
       {/* MODAL: NEW SUPPORT TICKET                                                 */}
       {/* ========================================================================= */}
       {showNewTicketModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-xl border border-gray-200">
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl w-[95%] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-6 space-y-4 shadow-xl border border-gray-200 mx-auto">
             <div className="flex items-center justify-between border-b border-gray-100 pb-3">
               <div className="flex items-center gap-2">
                 <span className="text-xl">📝</span>
@@ -2657,7 +2691,12 @@ export const Dashboard: React.FC = () => {
         onClose={() => setShowPreExamModal(false)}
         subjects={subjects}
         userTier={userTier}
-        onOpenUpgradeModal={() => setShowUpgradeModal(true)}
+        onOpenUpgradeModal={() => {
+          setUpgradeReasonMessage(
+            'Topic Practice Drills are exclusive to Pro members. Upgrade to Pro for ₦1,000 to unlock targeted subject practice.'
+          )
+          setShowUpgradeModal(true)
+        }}
         onLaunchExam={handleLaunchExamFromSetup}
         initialSelectedSubjectIds={selectedSubjects}
         initialMode={preExamInitialMode}
@@ -2666,18 +2705,23 @@ export const Dashboard: React.FC = () => {
       {/* JAMBStar Pro Paystack Upgrade Modal */}
       <UpgradeModal
         isOpen={showUpgradeModal}
-        onClose={() => setShowUpgradeModal(false)}
+        onClose={() => {
+          setShowUpgradeModal(false)
+          setUpgradeReasonMessage(null)
+        }}
         user={currentUser}
+        reasonMessage={upgradeReasonMessage}
         onUpgradeSuccess={() => {
           setUserTier('pro')
           setShowUpgradeModal(false)
+          setUpgradeReasonMessage(null)
         }}
       />
 
       {/* Monetization Invitation & Onboarding Modal */}
       {showInviteModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 space-y-6 shadow-2xl border border-gray-100 relative">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-3xl w-[95%] sm:w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-8 space-y-6 shadow-2xl border border-gray-100 relative mx-auto">
             <button
               type="button"
               onClick={() => setShowInviteModal(false)}
@@ -2920,8 +2964,8 @@ export const Dashboard: React.FC = () => {
 
       {/* Payout Request Modal */}
       {showPayoutModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 space-y-5 shadow-2xl border border-gray-100 relative">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-3xl w-[95%] sm:w-full max-w-md max-h-[90vh] overflow-y-auto p-5 sm:p-8 space-y-5 shadow-2xl border border-gray-100 relative mx-auto">
             <button
               type="button"
               onClick={() => {

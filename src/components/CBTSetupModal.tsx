@@ -237,6 +237,14 @@ export const CBTSetupModal: React.FC<CBTSetupModalProps> = ({
   }
 
   const handleStartDrillClick = () => {
+    if (!isPro) {
+      setLockNotice(
+        'Topic Practice Drills are exclusive to Pro members. Upgrade to Pro for ₦1,000 to unlock targeted subject practice.'
+      )
+      onOpenUpgradeModal()
+      return
+    }
+
     if (!drillSubjectId) {
       setLockNotice('Please pick a target subject to start topic practice.')
       return
@@ -260,7 +268,7 @@ export const CBTSetupModal: React.FC<CBTSetupModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-200">
-      <div className="relative bg-white rounded-3xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh]">
+      <div className="relative bg-white rounded-3xl w-[95%] sm:w-full max-w-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh] mx-auto">
         {/* Modal Top Header */}
         <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 px-6 py-5 text-white shrink-0 relative">
           <button
@@ -325,7 +333,14 @@ export const CBTSetupModal: React.FC<CBTSetupModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setActiveTab('drill')}
+              onClick={() => {
+                setActiveTab('drill')
+                if (!isPro) {
+                  setLockNotice(
+                    'Topic Practice Drills are exclusive to Pro members. Upgrade to Pro for ₦1,000 to unlock targeted subject practice.'
+                  )
+                }
+              }}
               className={`flex-1 py-2 px-3 sm:px-4 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-1.5 sm:gap-2 cursor-pointer ${
                 activeTab === 'drill'
                   ? 'bg-white text-emerald-800 shadow-sm border border-emerald-300'
@@ -333,9 +348,16 @@ export const CBTSetupModal: React.FC<CBTSetupModalProps> = ({
               }`}
             >
               <span>🎯 Topic Practice Drill</span>
-              <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-amber-400 text-slate-950">
-                Topics
-              </span>
+              {isPro ? (
+                <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-amber-400 text-slate-950">
+                  Topics
+                </span>
+              ) : (
+                <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-amber-500 text-white flex items-center gap-0.5">
+                  <span>🔒</span>
+                  <span>Pro</span>
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -549,6 +571,29 @@ export const CBTSetupModal: React.FC<CBTSetupModalProps> = ({
           {/* ================================================================= */}
           {activeTab === 'drill' && (
             <div className="space-y-5">
+              {!isPro && (
+                <div className="p-4 rounded-2xl bg-amber-50 border border-amber-300 text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs animate-in fade-in">
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl shrink-0">🔒</span>
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-bold text-slate-900">
+                        Topic Practice Drills are Exclusive to Pro Members
+                      </h4>
+                      <p className="text-[11px] sm:text-xs text-slate-600 mt-0.5">
+                        Upgrade to Pro for ₦1,000 to unlock targeted subject practice, custom question counts, and untimed revision modes.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onOpenUpgradeModal}
+                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs shrink-0 cursor-pointer transition-all shadow-xs"
+                  >
+                    Upgrade to Pro ⭐
+                  </button>
+                </div>
+              )}
+
               {/* Step 1: Select Target Subject */}
               <div>
                 <label className="block text-xs font-bold text-slate-900 uppercase tracking-wider mb-1.5">
@@ -770,6 +815,17 @@ export const CBTSetupModal: React.FC<CBTSetupModalProps> = ({
                 }`}
               >
                 ({selectedSubjectIds.length}/4 Subs • {isPro ? durationMinutes : 120}m)
+              </span>
+            </button>
+          ) : !isPro ? (
+            <button
+              type="button"
+              onClick={handleStartDrillClick}
+              className="w-full sm:w-auto px-6 py-2.5 rounded-xl text-sm font-black text-slate-950 bg-amber-400 hover:bg-amber-500 active:scale-[0.99] shadow-md hover:shadow-lg cursor-pointer transition-all flex items-center justify-center gap-2"
+            >
+              <span>🔒 Unlock Topic Drills (Upgrade to Pro)</span>
+              <span className="text-xs font-mono text-slate-800">
+                (₦1,000 Lifetime)
               </span>
             </button>
           ) : (

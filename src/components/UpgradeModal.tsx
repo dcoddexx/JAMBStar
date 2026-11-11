@@ -11,6 +11,7 @@ export interface UpgradeModalProps {
     full_name?: string
   } | null
   onUpgradeSuccess: () => void
+  reasonMessage?: string | null
 }
 
 export const UpgradeModal: React.FC<UpgradeModalProps> = ({
@@ -18,6 +19,7 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
   onClose,
   user,
   onUpgradeSuccess,
+  reasonMessage,
 }) => {
   const [isProcessing, setIsProcessing] = useState<boolean>(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -128,10 +130,10 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-xs animate-in fade-in duration-200">
-      <div className="relative bg-white rounded-3xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/70 backdrop-blur-xs animate-in fade-in duration-200">
+      <div className="relative bg-white rounded-3xl w-[95%] sm:w-full max-w-lg shadow-2xl border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col mx-auto">
         {/* Header Ribbon / Banner */}
-        <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 px-6 py-6 text-white relative shrink-0">
+        <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 px-5 sm:px-6 py-5 sm:py-6 text-white relative shrink-0">
           <button
             type="button"
             onClick={onClose}
@@ -146,7 +148,7 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
             <span>JAMBStar Pro Access</span>
           </div>
 
-          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
+          <h2 className="text-xl sm:text-3xl font-black tracking-tight text-white">
             Unlock Full CBT Superpowers
           </h2>
           <p className="text-emerald-100 text-xs sm:text-sm mt-1">
@@ -155,7 +157,15 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 space-y-5 overflow-y-auto flex-1">
+        <div className="p-5 sm:p-6 space-y-4 sm:space-y-5 overflow-y-auto flex-1">
+          {/* Reason Alert (e.g. Pro-only Topic Drills) */}
+          {reasonMessage && (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs sm:text-sm font-semibold flex items-center gap-2.5 shadow-2xs">
+              <span className="text-lg shrink-0">🔒</span>
+              <span className="flex-1 leading-relaxed">{reasonMessage}</span>
+            </div>
+          )}
+
           {/* Success Alert */}
           {successMessage && (
             <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm font-semibold flex items-center gap-3 animate-in fade-in">

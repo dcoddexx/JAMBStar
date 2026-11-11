@@ -16,6 +16,8 @@ import TermsOfService from "./pages/TermsOfService";
 import Contact from "./pages/Contact";
 import Settings from "./pages/Settings";
 import Navbar, { normalizeRole, isUserAdmin } from "./components/Navbar";
+import { MaintenanceScreen } from "./components/MaintenanceScreen";
+import { fetchSystemSettings, type SystemSettings } from "./services/systemSettings";
 
 export { normalizeRole, isUserAdmin };
 
@@ -99,6 +101,29 @@ const AdminRoute: React.FC<AdminRouteProps> = ({
 };
 
 // -----------------------------------------------------------------------------
+// MaintenanceGuard: Intercepts candidate routes during scheduled maintenance
+// Lockout prevention: Admin and Super Admin users bypass this guard completely
+// -----------------------------------------------------------------------------
+interface MaintenanceGuardProps {
+  children: React.ReactNode;
+  settings: SystemSettings | null;
+  isAdmin: boolean;
+  onRefresh: (fresh: SystemSettings) => void;
+}
+
+const MaintenanceGuard: React.FC<MaintenanceGuardProps> = ({
+  children,
+  settings,
+  isAdmin,
+  onRefresh,
+}) => {
+  if (settings?.is_maintenance && !isAdmin) {
+    return <MaintenanceScreen settings={settings} onStatusRefreshed={onRefresh} />;
+  }
+  return <>{children}</>;
+};
+
+// -----------------------------------------------------------------------------
 // Main App Component
 // -----------------------------------------------------------------------------
 const App: React.FC = () => {
@@ -107,6 +132,16 @@ const App: React.FC = () => {
     null,
   );
   const [authLoading, setAuthLoading] = useState<boolean>(true);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+
+  const checkMaintenance = async () => {
+    try {
+      const s = await fetchSystemSettings();
+      setSystemSettings(s);
+    } catch {
+      // ignore
+    }
+  };
 
   // Query role from profiles table with normalization
   const fetchUserRole = async (
@@ -139,6 +174,7 @@ const App: React.FC = () => {
 
     const initializeAuth = async () => {
       try {
+        await checkMaintenance();
         const {
           data: { session },
         } = await supabase.auth.getSession();
@@ -192,8 +228,9 @@ const App: React.FC = () => {
       }
     });
 
-    // Re-check profile role when window regains focus to reflect live database updates immediately
+    // Re-check profile role and system maintenance when window regains focus
     const handleFocus = async () => {
+      checkMaintenance();
       const {
         data: { session },
       } = await supabase.auth.getSession();
@@ -205,10 +242,14 @@ const App: React.FC = () => {
 
     window.addEventListener("focus", handleFocus);
 
+    // Periodic check for maintenance auto-off expiration (every 60s)
+    const maintenanceInterval = setInterval(checkMaintenance, 60000);
+
     return () => {
       isMounted = false;
       subscription.unsubscribe();
       window.removeEventListener("focus", handleFocus);
+      clearInterval(maintenanceInterval);
     };
   }, []);
 
@@ -218,39 +259,65 @@ const App: React.FC = () => {
     setRole(null);
   };
 
+  const isPrivilegedAdmin = isUserAdmin(role);
+
   return (
     <BrowserRouter>
-      <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 antialiased font-sans">
+      <div className="min-h-screen max-w-full overflow-x-hidden flex flex-col bg-slate-50 text-slate-900 antialiased font-sans">
         {/* Navigation Bar Component */}
         <Navbar user={user} role={role} onSignOut={handleSignOut} />
 
+        {/* Global Scheduled Maintenance Announcement Banner (Bypassed for Admins) */}
+        {systemSettings?.is_maintenance && !isPrivilegedAdmin && (
+          <div className="bg-amber-500 text-slate-950 px-4 py-2.5 text-xs sm:text-sm font-bold text-center flex items-center justify-center gap-2 shadow-xs">
+            <span>⚠️</span>
+            <span>
+              Scheduled maintenance is in progress. Practice drills and CBT testing are temporarily paused for updates.
+            </span>
+          </div>
+        )}
+
         {/* Main Content Area */}
-        <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-8">
+        <main className="flex-1 w-full max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 max-w-full overflow-x-hidden">
           <Routes>
             <Route path="/" element={<Landing />} />
 
-            {/* Candidate Protected Routes */}
+            {/* Candidate Protected Routes (Guarded by MaintenanceScreen) */}
             <Route
               path="/dashboard"
               element={
-                <ProtectedRoute user={user} loading={authLoading} redirectTo="/?auth=signup">
-                  <Dashboard />
-                </ProtectedRoute>
+                <MaintenanceGuard settings={systemSettings} isAdmin={isPrivilegedAdmin} onRefresh={setSystemSettings}>
+                  <ProtectedRoute user={user} loading={authLoading} redirectTo="/?auth=signup">
+                    <Dashboard />
+                  </ProtectedRoute>
+                </MaintenanceGuard>
               }
             />
-            {/* Candidate Settings Route */}
+            {/* Candidate Settings Route (Guarded by MaintenanceScreen) */}
             <Route
               path="/settings"
               element={
-                <ProtectedRoute user={user} loading={authLoading} redirectTo="/?auth=signup">
-                  <Settings />
-                </ProtectedRoute>
+                <MaintenanceGuard settings={systemSettings} isAdmin={isPrivilegedAdmin} onRefresh={setSystemSettings}>
+                  <ProtectedRoute user={user} loading={authLoading} redirectTo="/?auth=signup">
+                    <Settings />
+                  </ProtectedRoute>
+                </MaintenanceGuard>
               }
             />
-            {/* CBT Quiz Route: accessible to logged-in candidates and guest demo candidates */}
-            <Route path="/quiz" element={<Quiz />} />
+            {/* CBT Quiz Route: accessible to logged-in candidates and guest demo candidates (Guarded by MaintenanceScreen) */}
+            <Route
+              path="/quiz"
+              element={
+                <MaintenanceGuard settings={systemSettings} isAdmin={isPrivilegedAdmin} onRefresh={setSystemSettings}>
+                  <Quiz />
+                </MaintenanceGuard>
+              }
+            />
 
-            {/* Admin-Only Protected Route */}
+            {/* Direct Login Shortcut */}
+            <Route path="/login" element={<Navigate to="/?auth=login" replace />} />
+
+            {/* Admin-Only Protected Route (Never Locked Out During Maintenance) */}
             <Route
               path="/admin"
               element={

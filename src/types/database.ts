@@ -25,6 +25,7 @@ export interface Database {
           can_manage_pro?: boolean
           can_manage_monetization_invites?: boolean
           can_view_monetization?: boolean
+          can_manage_maintenance?: boolean
           monetization_status: 'none' | 'invited' | 'active' | 'declined'
           monetization_invited_at: string | null
           referral_code: string | null
@@ -52,6 +53,7 @@ export interface Database {
           can_manage_pro?: boolean
           can_manage_monetization_invites?: boolean
           can_view_monetization?: boolean
+          can_manage_maintenance?: boolean
           monetization_status?: 'none' | 'invited' | 'active' | 'declined'
           monetization_invited_at?: string | null
           referral_code?: string | null
@@ -79,6 +81,7 @@ export interface Database {
           can_manage_pro?: boolean
           can_manage_monetization_invites?: boolean
           can_view_monetization?: boolean
+          can_manage_maintenance?: boolean
           monetization_status?: 'none' | 'invited' | 'active' | 'declined'
           monetization_invited_at?: string | null
           referral_code?: string | null
@@ -444,6 +447,29 @@ export interface Database {
           processed_by?: string | null
           notes?: string | null
           created_at?: string
+          updated_at?: string
+        }
+      }
+      system_settings: {
+        Row: {
+          id: string
+          is_maintenance: boolean
+          maintenance_message: string
+          maintenance_auto_off_at: string | null
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          is_maintenance?: boolean
+          maintenance_message?: string
+          maintenance_auto_off_at?: string | null
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          is_maintenance?: boolean
+          maintenance_message?: string
+          maintenance_auto_off_at?: string | null
           updated_at?: string
         }
       }

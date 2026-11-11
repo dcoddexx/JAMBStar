@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     can_manage_pro BOOLEAN NOT NULL DEFAULT false,
     can_manage_monetization_invites BOOLEAN NOT NULL DEFAULT false,
     can_view_monetization BOOLEAN NOT NULL DEFAULT false,
+    can_manage_maintenance BOOLEAN NOT NULL DEFAULT false,
     monetization_status TEXT NOT NULL DEFAULT 'none' CHECK (monetization_status IN ('none', 'invited', 'active', 'declined')),
     monetization_invited_at TIMESTAMPTZ,
     referral_code TEXT UNIQUE,
@@ -58,6 +59,7 @@ ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_questions BOOLEA
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_pro BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_monetization_invites BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_view_monetization BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS can_manage_maintenance BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS monetization_status TEXT NOT NULL DEFAULT 'none' CHECK (monetization_status IN ('none', 'invited', 'active', 'declined'));
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS monetization_invited_at TIMESTAMPTZ;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
@@ -295,6 +297,28 @@ CREATE TABLE IF NOT EXISTS public.payouts (
 );
 
 COMMENT ON TABLE public.payouts IS 'Affiliate withdrawal requests and settlement records.';
+
+-- ------------------------------------------------------------------------------
+-- 2.10 system_settings
+-- System-wide runtime flags and scheduled maintenance parameters
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.system_settings (
+    id TEXT PRIMARY KEY DEFAULT 'global',
+    is_maintenance BOOLEAN NOT NULL DEFAULT false,
+    maintenance_message TEXT NOT NULL DEFAULT 'We are currently performing scheduled system updates to improve your JAMBStar CBT practice experience. Please check back shortly.',
+    maintenance_auto_off_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+INSERT INTO public.system_settings (id, is_maintenance, maintenance_message)
+VALUES (
+    'global',
+    false,
+    'We are currently performing scheduled system updates to improve your JAMBStar CBT practice experience. Please check back shortly.'
+)
+ON CONFLICT (id) DO NOTHING;
+
+COMMENT ON TABLE public.system_settings IS 'Global application state including maintenance mode toggles and auto-off timers.';
 
 -- ==============================================================================
 -- 3. INDEXES FOR PERFORMANCE
@@ -744,6 +768,32 @@ CREATE POLICY "Admins can update payouts"
     FOR UPDATE
     TO authenticated
     USING (public.is_admin(auth.uid()))
+    WITH CHECK (public.is_admin(auth.uid()));
+
+-- ------------------------------------------------------------------------------
+-- RLS: system_settings
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Anyone can view system settings" ON public.system_settings;
+CREATE POLICY "Anyone can view system settings"
+    ON public.system_settings
+    FOR SELECT
+    USING (true);
+
+DROP POLICY IF EXISTS "Admins can update system settings" ON public.system_settings;
+CREATE POLICY "Admins can update system settings"
+    ON public.system_settings
+    FOR UPDATE
+    TO authenticated
+    USING (public.is_admin(auth.uid()))
+    WITH CHECK (public.is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS "Admins can insert system settings" ON public.system_settings;
+CREATE POLICY "Admins can insert system settings"
+    ON public.system_settings
+    FOR INSERT
+    TO authenticated
     WITH CHECK (public.is_admin(auth.uid()));
 
 -- ==============================================================================

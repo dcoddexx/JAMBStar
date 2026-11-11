@@ -183,8 +183,37 @@ export const Quiz: React.FC = () => {
           setCandidateUser(null)
         }
 
-        // 2. Check for active CBT Session in localStorage (handles F5 reload persistence)
+        // Strict guard: Topic Practice Drills are strictly restricted to Pro tier
         const stored = getStoredCBTSession()
+        if (isTopicDrill || stored?.session?.isTopicDrill) {
+          if (isGuestOrDemo || !user) {
+            navigate('/dashboard?upgradeNotice=topic_drill', { replace: true })
+            return
+          }
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('is_pro, tier, role')
+            .eq('id', user.id)
+            .maybeSingle()
+
+          const isProUser =
+            profile?.is_pro === true ||
+            profile?.tier === 'pro' ||
+            profile?.role === 'super_admin' ||
+            profile?.role === 'admin'
+
+          if (!isProUser) {
+            try {
+              localStorage.removeItem('jambstar_active_cbt_session')
+            } catch {
+              // ignore
+            }
+            navigate('/dashboard?upgradeNotice=topic_drill', { replace: true })
+            return
+          }
+        }
+
+        // 2. Check for active CBT Session in localStorage (handles F5 reload persistence)
         if (stored) {
           const { session, restoredTimeLeft, restoredElapsedTime } = stored
           setSubjects(session.subjects)

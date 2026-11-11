@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
+import { fetchSystemSettings, updateSystemSettings, type SystemSettings } from '../services/systemSettings'
 
 export interface Profile {
   id: string
@@ -25,6 +26,7 @@ export interface Profile {
   can_manage_pro?: boolean
   can_manage_monetization_invites?: boolean
   can_view_monetization?: boolean
+  can_manage_maintenance?: boolean
   last_read_notices?: string | null
   created_at: string
 }
@@ -148,6 +150,7 @@ export const Admin: React.FC = () => {
     can_manage_pro?: boolean
     can_manage_monetization_invites?: boolean
     can_view_monetization?: boolean
+    can_manage_maintenance?: boolean
   } | null>(null)
   const [loadingUser, setLoadingUser] = useState<boolean>(true)
 
@@ -275,6 +278,21 @@ export const Admin: React.FC = () => {
   })
   const [settingsSavedMsg, setSettingsSavedMsg] = useState<string | null>(null)
 
+  // System Maintenance State (Super Admin & Staff with can_manage_maintenance)
+  const [maintenanceSettings, setMaintenanceSettings] = useState<SystemSettings>({
+    id: 'global',
+    is_maintenance: false,
+    maintenance_message: '',
+    maintenance_auto_off_at: null,
+    updated_at: '',
+  })
+  const [loadingMaintenance, setLoadingMaintenance] = useState<boolean>(false)
+  const [savingMaintenance, setSavingMaintenance] = useState<boolean>(false)
+  const [maintenanceActionMsg, setMaintenanceActionMsg] = useState<{
+    type: 'success' | 'error'
+    text: string
+  } | null>(null)
+
   // Role Checks with normalization (handles 'super_admin', 'superadmin', 'admin' case-insensitively)
   const normalizedRole = currentUser?.role
     ? currentUser.role.toLowerCase().trim().replace(/[\s_-]/g, '')
@@ -287,6 +305,7 @@ export const Admin: React.FC = () => {
   const canManagePro = isSuperAdmin || currentUser?.can_manage_pro === true
   const canManageMonetizationInvites = isSuperAdmin || currentUser?.can_manage_monetization_invites === true
   const canViewMonetization = isSuperAdmin || currentUser?.can_view_monetization === true
+  const canManageMaintenance = isSuperAdmin || currentUser?.can_manage_maintenance === true
   const adminPendingPayoutsCount = useMemo(
     () => adminPayouts.filter((p) => p.status === 'pending').length,
     [adminPayouts]
@@ -327,6 +346,7 @@ export const Admin: React.FC = () => {
           can_manage_pro: profile?.can_manage_pro === true,
           can_manage_monetization_invites: profile?.can_manage_monetization_invites === true,
           can_view_monetization: profile?.can_view_monetization === true,
+          can_manage_maintenance: profile?.can_manage_maintenance === true,
         })
       }
     } catch (err) {
@@ -759,7 +779,8 @@ export const Admin: React.FC = () => {
       | 'can_manage_questions'
       | 'can_manage_pro'
       | 'can_manage_monetization_invites'
-      | 'can_view_monetization',
+      | 'can_view_monetization'
+      | 'can_manage_maintenance',
     currentVal: boolean
   ) => {
     if (!isSuperAdmin) {
@@ -874,6 +895,7 @@ export const Admin: React.FC = () => {
     fetchTopics()
     fetchSupportTickets()
     fetchNotices()
+    fetchMaintenanceData()
   }, [])
 
   useEffect(() => {
@@ -2038,6 +2060,74 @@ export const Admin: React.FC = () => {
   }
 
   // ---------------------------------------------------------------------------
+  // Super Admin & Authorized Staff: System Maintenance Management
+  // ---------------------------------------------------------------------------
+  const fetchMaintenanceData = async () => {
+    setLoadingMaintenance(true)
+    try {
+      const s = await fetchSystemSettings()
+      setMaintenanceSettings(s)
+    } catch (err) {
+      console.warn('Failed to load maintenance settings:', err)
+    } finally {
+      setLoadingMaintenance(false)
+    }
+  }
+
+  const handleSaveMaintenance = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!canManageMaintenance) {
+      setMaintenanceActionMsg({
+        type: 'error',
+        text: 'Unauthorized: You do not have permission to modify system maintenance settings.',
+      })
+      return
+    }
+
+    setSavingMaintenance(true)
+    setMaintenanceActionMsg(null)
+
+    try {
+      const res = await updateSystemSettings({
+        is_maintenance: maintenanceSettings.is_maintenance,
+        maintenance_message: maintenanceSettings.maintenance_message.trim(),
+        maintenance_auto_off_at: maintenanceSettings.maintenance_auto_off_at || null,
+      })
+
+      if (!res.success) {
+        throw new Error(res.error || 'Failed to update system maintenance settings.')
+      }
+
+      setMaintenanceActionMsg({
+        type: 'success',
+        text: `System maintenance settings successfully updated. ${
+          maintenanceSettings.is_maintenance
+            ? 'Maintenance mode is now ACTIVE. Candidate access is restricted.'
+            : 'System is ONLINE. Candidate access is fully restored.'
+        }`,
+      })
+      setTimeout(() => setMaintenanceActionMsg(null), 6000)
+    } catch (err: unknown) {
+      const error = err as Error
+      setMaintenanceActionMsg({ type: 'error', text: error.message })
+    } finally {
+      setSavingMaintenance(false)
+    }
+  }
+
+  const handleSetAutoOffPreset = (minutes: number | null) => {
+    if (minutes === null) {
+      setMaintenanceSettings((prev) => ({ ...prev, maintenance_auto_off_at: null }))
+      return
+    }
+    const targetDate = new Date(Date.now() + minutes * 60 * 1000)
+    const localIso = new Date(targetDate.getTime() - targetDate.getTimezoneOffset() * 60000)
+      .toISOString()
+      .slice(0, 16)
+    setMaintenanceSettings((prev) => ({ ...prev, maintenance_auto_off_at: localIso }))
+  }
+
+  // ---------------------------------------------------------------------------
   // Filtered & Paginated Questions for Question Bank Tab
   // ---------------------------------------------------------------------------
   const availableYears = useMemo(() => {
@@ -2349,9 +2439,12 @@ export const Admin: React.FC = () => {
           </button>
         )}
 
-        {/* Tab 4: Global CBT Settings (Super Admin Only) */}
+        {/* Tab 4: System Settings & Maintenance (Super Admin & Authorized Staff) */}
         <button
-          onClick={() => setActiveTab('settings')}
+          onClick={() => {
+            setActiveTab('settings')
+            fetchMaintenanceData()
+          }}
           className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
             activeTab === 'settings'
               ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
@@ -2359,8 +2452,13 @@ export const Admin: React.FC = () => {
           }`}
         >
           <span>⚙️</span>
-          <span>Global CBT Settings</span>
-          {!isSuperAdmin && (
+          <span>Settings & Maintenance</span>
+          {maintenanceSettings.is_maintenance && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500 text-slate-950 font-bold font-mono">
+              🔴 Active
+            </span>
+          )}
+          {!isSuperAdmin && !canManageMaintenance && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-mono">
               🔒
             </span>
@@ -3946,6 +4044,7 @@ export const Admin: React.FC = () => {
                           <th className="py-3.5 px-4 text-center">Manage Pro Tier</th>
                           <th className="py-3.5 px-4 text-center">View Monetization</th>
                           <th className="py-3.5 px-4 text-center">Manage Invites</th>
+                          <th className="py-3.5 px-4 text-center">Manage Maintenance</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -3958,6 +4057,7 @@ export const Admin: React.FC = () => {
                             const canPro = adm.can_manage_pro === true
                             const canViewMonet = adm.can_view_monetization === true
                             const canManageInvites = adm.can_manage_monetization_invites === true
+                            const canMaintenance = adm.can_manage_maintenance === true
 
                             return (
                               <tr key={adm.id} className="hover:bg-gray-50/70 transition-colors">
@@ -4124,6 +4224,32 @@ export const Admin: React.FC = () => {
                                     {canManageInvites ? 'Allowed' : 'Restricted'}
                                   </span>
                                 </td>
+
+                                {/* Toggle: Manage System Maintenance */}
+                                <td className="py-4 px-4 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleToggleAdminPermission(
+                                        adm.id,
+                                        'can_manage_maintenance',
+                                        canMaintenance
+                                      )
+                                    }
+                                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 ${
+                                      canMaintenance ? 'bg-amber-600' : 'bg-gray-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                        canMaintenance ? 'translate-x-6' : 'translate-x-1'
+                                      }`}
+                                    />
+                                  </button>
+                                  <span className="block text-[10px] text-gray-500 mt-0.5">
+                                    {canMaintenance ? 'Allowed' : 'Restricted'}
+                                  </span>
+                                </td>
                               </tr>
                             )
                           })}
@@ -4138,130 +4264,352 @@ export const Admin: React.FC = () => {
       )}
 
       {/* ======================================================================= */}
-      {/* SECTION 4: GLOBAL CBT SETTINGS (Super Admin Only)                       */}
+      {/* SECTION 4: SYSTEM SETTINGS & MAINTENANCE (Super Admin & Auth Staff)       */}
       {/* ======================================================================= */}
       {activeTab === 'settings' && (
-        <div className="space-y-4">
-          {!isSuperAdmin ? (
+        <div className="space-y-6">
+          {!isSuperAdmin && !canManageMaintenance ? (
             <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 shadow-sm space-y-3">
               <span className="text-4xl">🔒</span>
               <h2 className="text-xl font-extrabold text-gray-900">
-                Super Admin Access Required
+                Administrative Settings Restricted
               </h2>
               <p className="text-sm text-gray-500 max-w-md mx-auto">
-                Global examination duration, passing marks, and subject rules can only be modified by Super Admins.
+                Global examination duration, passing marks, and scheduled maintenance controls require Super Admin access or dedicated permission delegation.
               </p>
             </div>
           ) : (
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs p-6 sm:p-8 max-w-2xl space-y-6">
-              <div>
-                <h3 className="text-lg font-bold text-gray-900">
-                  Global CBT Examination Configuration
-                </h3>
-                <p className="text-xs text-gray-500 mt-1">
-                  Adjust default parameters for candidate mock exams. Settings are stored in system local storage and dynamically referenced by the Quiz simulator.
-                </p>
-              </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+              {/* CARD 1: SYSTEM MAINTENANCE & CANDIDATE ACCESS CONTROLS */}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs p-6 sm:p-8 space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
+                  <div>
+                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-slate-100 text-slate-800 mb-2">
+                      <span>🛠️</span>
+                      <span>System Maintenance</span>
+                    </div>
+                    <h3 className="text-lg font-bold text-gray-900">
+                      Scheduled Maintenance & Lockout
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Temporarily pause candidate CBT practice for system updates or database maintenance.
+                    </p>
+                  </div>
 
-              {settingsSavedMsg && (
-                <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs sm:text-sm font-medium flex items-center gap-2">
-                  <span>✓</span>
-                  <span>{settingsSavedMsg}</span>
-                </div>
-              )}
-
-              <form onSubmit={handleSaveSettings} className="space-y-5 text-xs sm:text-sm">
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
-                    Exam Duration (Minutes)
-                  </label>
-                  <input
-                    type="number"
-                    min="10"
-                    max="300"
-                    required
-                    value={cbtSettings.examDuration}
-                    onChange={(e) =>
-                      setCbtSettings({
-                        ...cbtSettings,
-                        examDuration: parseInt(e.target.value, 10) || 120,
-                      })
-                    }
-                    className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  />
-                  <p className="text-[11px] text-gray-400 mt-1">
-                    Standard JAMB UTME duration is 120 minutes (2 hours). The countdown timer on Quiz.tsx will initialize with this duration.
-                  </p>
+                  <div className="shrink-0">
+                    {maintenanceSettings.is_maintenance ? (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black uppercase tracking-wider bg-red-100 text-red-800 border border-red-300 shadow-2xs">
+                        <span className="w-2 h-2 rounded-full bg-red-600 animate-ping"></span>
+                        <span>🔴 Active</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-300 shadow-2xs">
+                        <span className="w-2 h-2 rounded-full bg-emerald-600"></span>
+                        <span>🟢 Online</span>
+                      </span>
+                    )}
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
-                    Passing Threshold (%)
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="100"
-                    required
-                    value={cbtSettings.passingThreshold}
-                    onChange={(e) =>
-                      setCbtSettings({
-                        ...cbtSettings,
-                        passingThreshold: parseInt(e.target.value, 10) || 50,
-                      })
-                    }
-                    className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  />
-                  <p className="text-[11px] text-gray-400 mt-1">
-                    Minimum aggregate percentage to classify candidate result as a Pass (Default: 50%).
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
-                    Target Questions Per Subject
-                  </label>
-                  <input
-                    type="number"
-                    min="5"
-                    max="100"
-                    required
-                    value={cbtSettings.questionsPerSubject}
-                    onChange={(e) =>
-                      setCbtSettings({
-                        ...cbtSettings,
-                        questionsPerSubject: parseInt(e.target.value, 10) || 40,
-                      })
-                    }
-                    className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                  />
-                  <p className="text-[11px] text-gray-400 mt-1">
-                    Number of questions expected for standard UTME subject testing (Default: 40 questions).
-                  </p>
-                </div>
-
-                {cbtSettings.lastUpdated && (
-                  <div className="text-[11px] text-gray-400 italic">
-                    Last modified: {new Date(cbtSettings.lastUpdated).toLocaleString()}
+                {maintenanceActionMsg && (
+                  <div
+                    className={`p-3.5 rounded-xl border text-xs sm:text-sm font-medium flex items-center justify-between shadow-2xs animate-in fade-in ${
+                      maintenanceActionMsg.type === 'success'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-red-50 border-red-200 text-red-800'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span>{maintenanceActionMsg.type === 'success' ? '✓' : '⚠️'}</span>
+                      <span>{maintenanceActionMsg.text}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setMaintenanceActionMsg(null)}
+                      className="text-gray-400 hover:text-gray-600 font-bold ml-2"
+                    >
+                      ✕
+                    </button>
                   </div>
                 )}
 
-                <div className="pt-3 flex flex-col sm:flex-row gap-3 border-t border-gray-100">
-                  <button
-                    type="submit"
-                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold shadow-sm transition-colors cursor-pointer"
-                  >
-                    Save Configuration
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleResetSettings}
-                    className="px-4 py-2.5 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-xl text-xs sm:text-sm font-semibold transition-colors cursor-pointer"
-                  >
-                    Reset to JAMB Defaults
-                  </button>
+                <form onSubmit={handleSaveMaintenance} className="space-y-5 text-xs sm:text-sm">
+                  {/* Maintenance Toggle */}
+                  <div className="flex items-start justify-between gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
+                    <div>
+                      <span className="font-bold text-slate-900 block text-xs sm:text-sm">
+                        Maintenance Mode
+                      </span>
+                      <p className="text-[11px] sm:text-xs text-slate-500 mt-0.5 leading-relaxed">
+                        When enabled, candidate practice routes (/dashboard, /quiz) are redirected to the Maintenance Screen. Administrators retain full access.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={!canManageMaintenance || savingMaintenance}
+                      onClick={() =>
+                        setMaintenanceSettings((prev) => ({
+                          ...prev,
+                          is_maintenance: !prev.is_maintenance,
+                        }))
+                      }
+                      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 ${
+                        maintenanceSettings.is_maintenance ? 'bg-amber-600' : 'bg-gray-300'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                          maintenanceSettings.is_maintenance ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {/* Custom Message */}
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
+                      Candidate Maintenance Notice
+                    </label>
+                    <textarea
+                      rows={3}
+                      required
+                      value={maintenanceSettings.maintenance_message}
+                      onChange={(e) =>
+                        setMaintenanceSettings({
+                          ...maintenanceSettings,
+                          maintenance_message: e.target.value,
+                        })
+                      }
+                      placeholder="e.g. We are currently performing scheduled server upgrades. Please check back shortly."
+                      className="w-full px-3.5 py-2.5 border border-gray-300 rounded-xl text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none"
+                    />
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Rendered on the candidate Maintenance Screen during downtime.
+                    </p>
+                  </div>
+
+                  {/* Scheduled Auto-Off */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-bold text-gray-700 uppercase">
+                        Scheduled Auto-Off (Optional Expiration)
+                      </label>
+                      {maintenanceSettings.maintenance_auto_off_at && (
+                        <button
+                          type="button"
+                          onClick={() => handleSetAutoOffPreset(null)}
+                          className="text-[11px] font-semibold text-rose-600 hover:underline cursor-pointer"
+                        >
+                          Clear Expiration
+                        </button>
+                      )}
+                    </div>
+
+                    <input
+                      type="datetime-local"
+                      value={
+                        maintenanceSettings.maintenance_auto_off_at
+                          ? maintenanceSettings.maintenance_auto_off_at.slice(0, 16)
+                          : ''
+                      }
+                      onChange={(e) =>
+                        setMaintenanceSettings({
+                          ...maintenanceSettings,
+                          maintenance_auto_off_at: e.target.value ? new Date(e.target.value).toISOString() : null,
+                        })
+                      }
+                      className="w-full px-3.5 py-2 border border-gray-300 rounded-xl text-xs sm:text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+
+                    {/* Quick Preset Buttons */}
+                    <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                      <span className="text-[11px] text-gray-400 mr-1">Quick Presets:</span>
+                      <button
+                        type="button"
+                        onClick={() => handleSetAutoOffPreset(30)}
+                        className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-[11px] font-semibold text-gray-700 cursor-pointer"
+                      >
+                        +30 Mins
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSetAutoOffPreset(60)}
+                        className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-[11px] font-semibold text-gray-700 cursor-pointer"
+                      >
+                        +1 Hour
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSetAutoOffPreset(120)}
+                        className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-[11px] font-semibold text-gray-700 cursor-pointer"
+                      >
+                        +2 Hours
+                      </button>
+                    </div>
+
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      The system will automatically restore candidate practice access when this timestamp arrives.
+                    </p>
+                  </div>
+
+                  <div className="pt-3 border-t border-gray-100 flex items-center justify-between">
+                    <button
+                      type="submit"
+                      disabled={savingMaintenance || loadingMaintenance}
+                      className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-xl text-xs sm:text-sm font-bold shadow-sm transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {savingMaintenance ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          <span>Saving Settings...</span>
+                        </>
+                      ) : (
+                        <span>Save Maintenance Configuration</span>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={fetchMaintenanceData}
+                      disabled={loadingMaintenance}
+                      className="text-xs text-gray-500 hover:text-gray-800 cursor-pointer"
+                    >
+                      🔄 Refresh Status
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* CARD 2: GLOBAL CBT EXAMINATION CONFIGURATION (SUPER ADMIN) */}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs p-6 sm:p-8 space-y-6">
+                <div>
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 mb-2">
+                    <span>🏛️</span>
+                    <span>UTME Configuration</span>
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900">
+                    Global CBT Simulation Rules
+                  </h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Adjust default parameters for candidate mock exams. Settings are stored and dynamically referenced by the Quiz simulator.
+                  </p>
                 </div>
-              </form>
+
+                {!isSuperAdmin ? (
+                  <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 text-center space-y-2">
+                    <span className="text-2xl">🔒</span>
+                    <h4 className="text-xs sm:text-sm font-bold text-slate-900">
+                      Super Admin Access Required
+                    </h4>
+                    <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                      Only Super Administrators can modify global examination duration, passing marks, and subject rules.
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    {settingsSavedMsg && (
+                      <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs sm:text-sm font-medium flex items-center gap-2">
+                        <span>✓</span>
+                        <span>{settingsSavedMsg}</span>
+                      </div>
+                    )}
+
+                    <form onSubmit={handleSaveSettings} className="space-y-5 text-xs sm:text-sm">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
+                          Exam Duration (Minutes)
+                        </label>
+                        <input
+                          type="number"
+                          min="10"
+                          max="300"
+                          required
+                          value={cbtSettings.examDuration}
+                          onChange={(e) =>
+                            setCbtSettings({
+                              ...cbtSettings,
+                              examDuration: parseInt(e.target.value, 10) || 120,
+                            })
+                          }
+                          className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <p className="text-[11px] text-gray-400 mt-1">
+                          Standard JAMB UTME duration is 120 minutes (2 hours). The countdown timer on Quiz.tsx will initialize with this duration.
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
+                          Passing Threshold (%)
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          max="100"
+                          required
+                          value={cbtSettings.passingThreshold}
+                          onChange={(e) =>
+                            setCbtSettings({
+                              ...cbtSettings,
+                              passingThreshold: parseInt(e.target.value, 10) || 50,
+                            })
+                          }
+                          className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <p className="text-[11px] text-gray-400 mt-1">
+                          Minimum aggregate percentage to classify candidate result as a Pass (Default: 50%).
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-gray-700 uppercase mb-1">
+                          Target Questions Per Subject
+                        </label>
+                        <input
+                          type="number"
+                          min="5"
+                          max="100"
+                          required
+                          value={cbtSettings.questionsPerSubject}
+                          onChange={(e) =>
+                            setCbtSettings({
+                              ...cbtSettings,
+                              questionsPerSubject: parseInt(e.target.value, 10) || 40,
+                            })
+                          }
+                          className="w-full px-3.5 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <p className="text-[11px] text-gray-400 mt-1">
+                          Number of questions expected for standard UTME subject testing (Default: 40 questions).
+                        </p>
+                      </div>
+
+                      {cbtSettings.lastUpdated && (
+                        <div className="text-[11px] text-gray-400 italic">
+                          Last modified: {new Date(cbtSettings.lastUpdated).toLocaleString()}
+                        </div>
+                      )}
+
+                      <div className="pt-3 flex flex-col sm:flex-row gap-3 border-t border-gray-100">
+                        <button
+                          type="submit"
+                          className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold shadow-sm transition-colors cursor-pointer"
+                        >
+                          Save Configuration
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleResetSettings}
+                          className="px-4 py-2.5 border border-gray-300 text-gray-700 hover:bg-gray-50 rounded-xl text-xs sm:text-sm font-semibold transition-colors cursor-pointer"
+                        >
+                          Reset to JAMB Defaults
+                        </button>
+                      </div>
+                    </form>
+                  </>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -4604,8 +4952,8 @@ export const Admin: React.FC = () => {
       {/* MODAL 1: SAFETY CONFIRMATION FOR ACCOUNT DELETION                       */}
       {/* ======================================================================= */}
       {userToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-gray-200 text-center animate-in fade-in zoom-in-95 duration-150">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl w-[95%] sm:w-full max-w-md max-h-[90vh] overflow-y-auto p-6 shadow-2xl border border-gray-200 text-center animate-in fade-in zoom-in-95 duration-150 mx-auto">
             <div className="w-14 h-14 rounded-full bg-red-100 text-red-600 text-2xl flex items-center justify-center mx-auto mb-4">
               ⚠️
             </div>
@@ -4647,8 +4995,8 @@ export const Admin: React.FC = () => {
       {/* MODAL 2: BULK WIPE SUBJECT QUESTIONS (Super Admin Only)                 */}
       {/* ======================================================================= */}
       {showBulkWipeModal && activeSubject && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-red-200 text-center animate-in fade-in zoom-in-95 duration-150">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl w-[95%] sm:w-full max-w-md max-h-[90vh] overflow-y-auto p-6 shadow-2xl border border-red-200 text-center animate-in fade-in zoom-in-95 duration-150 mx-auto">
             <div className="w-14 h-14 rounded-full bg-red-100 text-red-600 text-2xl flex items-center justify-center mx-auto mb-4">
               🗑️
             </div>
@@ -4705,7 +5053,7 @@ export const Admin: React.FC = () => {
       {/* ======================================================================= */}
       {showBulkUploadModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-3xl w-full p-6 sm:p-8 shadow-2xl border border-gray-200 my-8 space-y-5 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-2xl w-[95%] sm:w-full max-w-3xl max-h-[90vh] overflow-y-auto p-5 sm:p-8 shadow-2xl border border-gray-200 my-4 sm:my-8 space-y-5 animate-in fade-in zoom-in-95 duration-150 mx-auto">
             <div className="flex items-center justify-between pb-3 border-b border-gray-100">
               <div className="flex items-center gap-2.5">
                 <span className="w-9 h-9 rounded-xl bg-slate-100 text-slate-800 flex items-center justify-center text-lg">
@@ -4902,8 +5250,8 @@ export const Admin: React.FC = () => {
       {/* MODAL 4: ADD / EDIT SINGLE QUESTION                                    */}
       {/* ======================================================================= */}
       {showAddQuestionModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl border border-gray-200 my-8">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
+          <div className="bg-white rounded-2xl w-[95%] sm:w-full max-w-2xl max-h-[90vh] overflow-y-auto p-5 sm:p-8 shadow-2xl border border-gray-200 my-4 sm:my-8 mx-auto">
             <div className="flex items-center justify-between pb-4 border-b border-gray-100">
               <div>
                 <h3 className="text-lg font-bold text-gray-900">
@@ -5119,8 +5467,8 @@ export const Admin: React.FC = () => {
       {/* MODAL: DIRECT MESSAGE CANDIDATE                                         */}
       {/* ======================================================================= */}
       {dmTargetUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-white rounded-2xl border border-gray-200 max-w-lg w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-2xl border border-gray-200 w-[95%] sm:w-full max-w-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh] mx-auto">
             <div className="p-5 bg-gradient-to-r from-emerald-600 to-teal-700 text-white flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-base flex items-center gap-2">
@@ -5203,8 +5551,8 @@ export const Admin: React.FC = () => {
       {/* MODAL: CREATE / EDIT NOTICE                                             */}
       {/* ======================================================================= */}
       {showNoticeModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-white rounded-2xl border border-gray-200 max-w-lg w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-2xl border border-gray-200 w-[95%] sm:w-full max-w-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh] mx-auto">
             <div className="p-5 bg-gradient-to-r from-emerald-600 to-teal-700 text-white flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-base flex items-center gap-2">
@@ -5284,8 +5632,8 @@ export const Admin: React.FC = () => {
       {/* MODAL: DELETE NOTICE CONFIRMATION                                       */}
       {/* ======================================================================= */}
       {noticeToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-white rounded-2xl border border-gray-200 max-w-sm w-full p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-2xl border border-gray-200 w-[95%] sm:w-full max-w-sm max-h-[90vh] overflow-y-auto p-6 shadow-2xl space-y-4 mx-auto">
             <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto text-2xl font-bold">
               🗑️
             </div>
