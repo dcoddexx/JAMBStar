@@ -15,6 +15,7 @@ import PrivacyPolicy from "./pages/PrivacyPolicy";
 import TermsOfService from "./pages/TermsOfService";
 import Contact from "./pages/Contact";
 import Settings from "./pages/Settings";
+import ResetPassword from "./pages/ResetPassword";
 import Navbar, { normalizeRole, isUserAdmin } from "./components/Navbar";
 import { MaintenanceScreen } from "./components/MaintenanceScreen";
 import { fetchSystemSettings, type SystemSettings } from "./services/systemSettings";
@@ -264,18 +265,18 @@ const App: React.FC = () => {
   return (
     <BrowserRouter>
       <div className="min-h-screen max-w-full overflow-x-hidden flex flex-col bg-slate-50 text-slate-900 antialiased font-sans">
-        {/* Navigation Bar Component */}
-        <Navbar user={user} role={role} onSignOut={handleSignOut} />
-
         {/* Global Scheduled Maintenance Announcement Banner (Bypassed for Admins) */}
         {systemSettings?.is_maintenance && !isPrivilegedAdmin && (
-          <div className="bg-amber-500 text-slate-950 px-4 py-2.5 text-xs sm:text-sm font-bold text-center flex items-center justify-center gap-2 shadow-xs">
+          <div className="relative z-50 bg-amber-500 text-slate-950 px-4 py-2 sm:py-2.5 text-xs sm:text-sm font-bold text-center flex items-center justify-center gap-2 shadow-xs border-b border-amber-600/30">
             <span>⚠️</span>
             <span>
               Scheduled maintenance is in progress. Practice drills and CBT testing are temporarily paused for updates.
             </span>
           </div>
         )}
+
+        {/* Navigation Bar Component */}
+        <Navbar user={user} role={role} onSignOut={handleSignOut} />
 
         {/* Main Content Area */}
         <main className="flex-1 w-full max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 max-w-full overflow-x-hidden">
@@ -316,6 +317,9 @@ const App: React.FC = () => {
 
             {/* Direct Login Shortcut */}
             <Route path="/login" element={<Navigate to="/?auth=login" replace />} />
+
+            {/* Password Recovery Route */}
+            <Route path="/reset-password" element={<ResetPassword />} />
 
             {/* Admin-Only Protected Route (Never Locked Out During Maintenance) */}
             <Route

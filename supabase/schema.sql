@@ -306,6 +306,7 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
     id TEXT PRIMARY KEY DEFAULT 'global',
     is_maintenance BOOLEAN NOT NULL DEFAULT false,
     maintenance_message TEXT NOT NULL DEFAULT 'We are currently performing scheduled system updates to improve your JAMBStar CBT practice experience. Please check back shortly.',
+    maintenance_auto_on_at TIMESTAMPTZ,
     maintenance_auto_off_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );

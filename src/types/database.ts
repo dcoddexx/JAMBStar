@@ -455,6 +455,7 @@ export interface Database {
           id: string
           is_maintenance: boolean
           maintenance_message: string
+          maintenance_auto_on_at: string | null
           maintenance_auto_off_at: string | null
           updated_at: string
         }
@@ -462,6 +463,7 @@ export interface Database {
           id?: string
           is_maintenance?: boolean
           maintenance_message?: string
+          maintenance_auto_on_at?: string | null
           maintenance_auto_off_at?: string | null
           updated_at?: string
         }
@@ -469,6 +471,7 @@ export interface Database {
           id?: string
           is_maintenance?: boolean
           maintenance_message?: string
+          maintenance_auto_on_at?: string | null
           maintenance_auto_off_at?: string | null
           updated_at?: string
         }

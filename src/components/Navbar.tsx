@@ -381,11 +381,11 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           {/* Brand / Logo */}
-          <Link to="/" className="flex items-center group py-1">
+          <Link to="/" className="flex items-center group py-0.5 h-14 overflow-hidden">
             <img
               src="/jambstar_full_logo.jpg"
               alt="JAMBStar UTME Simulator"
-              className="h-35 sm:h-40 w-auto object-contain transition-transform group-hover:scale-102"
+              className="h-11 sm:h-13 w-auto object-contain mix-blend-multiply transition-transform group-hover:scale-102"
             />
           </Link>
 

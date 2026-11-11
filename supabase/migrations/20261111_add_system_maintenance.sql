@@ -8,9 +8,15 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
     id TEXT PRIMARY KEY DEFAULT 'global',
     is_maintenance BOOLEAN NOT NULL DEFAULT false,
     maintenance_message TEXT NOT NULL DEFAULT 'We are currently performing scheduled system updates to improve your JAMBStar CBT practice experience. Please check back shortly.',
+    maintenance_auto_on_at TIMESTAMPTZ NULL,
     maintenance_auto_off_at TIMESTAMPTZ NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
+
+-- Upgrade existing table if already created
+ALTER TABLE public.system_settings
+    ADD COLUMN IF NOT EXISTS maintenance_auto_on_at TIMESTAMPTZ NULL,
+    ADD COLUMN IF NOT EXISTS maintenance_auto_off_at TIMESTAMPTZ NULL;
 
 -- Insert singleton global record if not present
 INSERT INTO public.system_settings (id, is_maintenance, maintenance_message)

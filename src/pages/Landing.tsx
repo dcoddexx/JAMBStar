@@ -4,7 +4,7 @@ import { supabase } from "../lib/supabase";
 import { AdBanner } from "../components/AdBanner";
 import { AnimatedExamTip } from "../components/AnimatedExamTip";
 
-type AuthMode = "signin" | "signup";
+type AuthMode = "signin" | "signup" | "forgot_password";
 type AcademicTrack = "Science" | "Arts" | "Commercial";
 
 interface ActiveUser {
@@ -67,8 +67,11 @@ export const Landing: React.FC = () => {
     if (authParam === "signup") {
       setMode("signup");
       setErrorMessage(null);
-    } else if (authParam === "signin") {
+    } else if (authParam === "signin" || authParam === "login") {
       setMode("signin");
+      setErrorMessage(null);
+    } else if (authParam === "forgot" || authParam === "forgot_password") {
+      setMode("forgot_password");
       setErrorMessage(null);
     }
   }, [searchParams]);
@@ -152,6 +155,32 @@ export const Landing: React.FC = () => {
     e.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
+
+    // 1. Forgot Password Recovery submission
+    if (mode === "forgot_password") {
+      if (!email.trim()) {
+        setErrorMessage("Please provide your registered email address.");
+        return;
+      }
+      setLoading(true);
+      try {
+        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+          redirectTo: `${window.location.origin}/reset-password`,
+        });
+        if (error) throw error;
+        setSuccessMessage(
+          "Password reset link sent! Check your email inbox to update your password.",
+        );
+      } catch (err: unknown) {
+        const error = err as Error;
+        setErrorMessage(
+          error.message || "Failed to send reset link. Please verify your email and try again.",
+        );
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
 
     if (!email.trim() || !password) {
       setErrorMessage("Please provide both an email address and a password.");
@@ -346,47 +375,73 @@ export const Landing: React.FC = () => {
               )}
 
               {/* Mode Switcher Tabs */}
-              <div className="flex rounded-xl bg-gray-100 p-1 mb-6">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode("signin");
-                    setErrorMessage(null);
-                    setSuccessMessage(null);
-                  }}
-                  className={`flex-1 py-2 text-sm font-semibold rounded-lg transition-all ${
-                    mode === "signin"
-                      ? "bg-white text-gray-900 shadow-xs"
-                      : "text-gray-500 hover:text-gray-900"
-                  }`}
-                >
-                  Sign In
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode("signup");
-                    setErrorMessage(null);
-                    setSuccessMessage(null);
-                  }}
-                  className={`flex-1 py-2 text-sm font-semibold rounded-lg transition-all ${
-                    mode === "signup"
-                      ? "bg-white text-gray-900 shadow-xs"
-                      : "text-gray-500 hover:text-gray-900"
-                  }`}
-                >
-                  Create Account
-                </button>
-              </div>
+              {mode === "forgot_password" ? (
+                <div className="flex items-center justify-between pb-3 mb-5 border-b border-gray-100">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                    <span className="text-xs font-bold uppercase tracking-wider text-gray-500">
+                      Account Recovery
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode("signin");
+                      setErrorMessage(null);
+                      setSuccessMessage(null);
+                    }}
+                    className="text-xs font-semibold text-emerald-600 hover:text-emerald-700 flex items-center gap-1 cursor-pointer"
+                  >
+                    ← Back to Sign In
+                  </button>
+                </div>
+              ) : (
+                <div className="flex rounded-xl bg-gray-100 p-1 mb-6">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode("signin");
+                      setErrorMessage(null);
+                      setSuccessMessage(null);
+                    }}
+                    className={`flex-1 py-2 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
+                      mode === "signin"
+                        ? "bg-white text-gray-900 shadow-xs"
+                        : "text-gray-500 hover:text-gray-900"
+                    }`}
+                  >
+                    Sign In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode("signup");
+                      setErrorMessage(null);
+                      setSuccessMessage(null);
+                    }}
+                    className={`flex-1 py-2 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
+                      mode === "signup"
+                        ? "bg-white text-gray-900 shadow-xs"
+                        : "text-gray-500 hover:text-gray-900"
+                    }`}
+                  >
+                    Create Account
+                  </button>
+                </div>
+              )}
 
               <div className="mb-5">
                 <h2 className="text-xl font-bold text-gray-900">
-                  {mode === "signin"
+                  {mode === "forgot_password"
+                    ? "Reset Your Password"
+                    : mode === "signin"
                     ? "Welcome Back, Candidate"
                     : "Create Student Account"}
                 </h2>
                 <p className="text-xs text-gray-500 mt-1">
-                  {mode === "signin"
+                  {mode === "forgot_password"
+                    ? "Enter your registered email address and we will send you a password recovery link."
+                    : mode === "signin"
                     ? "Sign in to access your test history, analytics, and timed CBT mocks."
                     : "Register your candidate profile and start your prep today."}
                 </p>
@@ -499,107 +554,131 @@ export const Landing: React.FC = () => {
                   />
                 </div>
 
-                <div>
-                  <label
-                    htmlFor="password"
-                    className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1"
-                  >
-                    Password
-                  </label>
-                  <div className="relative">
-                    <input
-                      id="password"
-                      type={showPassword ? "text" : "password"}
-                      required
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••"
-                      className="w-full pl-3.5 pr-10 py-2.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition-colors"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((prev) => !prev)}
-                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 focus:outline-none cursor-pointer"
-                      aria-label={
-                        showPassword ? "Hide password" : "Show password"
-                      }
-                      title={showPassword ? "Hide password" : "Show password"}
+                {mode !== "forgot_password" && (
+                  <div>
+                    <label
+                      htmlFor="password"
+                      className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1"
                     >
-                      {showPassword ? (
-                        <svg
-                          className="w-5 h-5"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                          strokeWidth={2}
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18"
-                          />
-                        </svg>
-                      ) : (
-                        <svg
-                          className="w-5 h-5"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                          strokeWidth={2}
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                          />
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                          />
-                        </svg>
-                      )}
-                    </button>
-                  </div>
-
-                  {/* Real-time Dynamic Password Validation Checklist (Registration only) */}
-                  {mode === "signup" && (
-                    <div className="mt-2.5 p-3 rounded-lg bg-gray-50 border border-gray-200">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 mb-2">
-                        Password Requirements
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                        {passwordCriteria.map((c) => (
-                          <div
-                            key={c.id}
-                            className={`flex items-center gap-2 transition-colors duration-200 ${
-                              c.isValid
-                                ? "text-emerald-700 font-medium"
-                                : "text-gray-400"
-                            }`}
+                      Password
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="password"
+                        type={showPassword ? "text" : "password"}
+                        required
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full pl-3.5 pr-10 py-2.5 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition-colors"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((prev) => !prev)}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 focus:outline-none cursor-pointer"
+                        aria-label={
+                          showPassword ? "Hide password" : "Show password"
+                        }
+                        title={showPassword ? "Hide password" : "Show password"}
+                      >
+                        {showPassword ? (
+                          <svg
+                            className="w-5 h-5"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            strokeWidth={2}
                           >
-                            <span
-                              className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0 transition-colors duration-200 ${
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18"
+                            />
+                          </svg>
+                        ) : (
+                          <svg
+                            className="w-5 h-5"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                            />
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                            />
+                          </svg>
+                        )}
+                      </button>
+                    </div>
+
+                    {mode === "signin" && (
+                      <div className="flex justify-end mt-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMode("forgot_password");
+                            setErrorMessage(null);
+                            setSuccessMessage(null);
+                          }}
+                          className="text-xs font-semibold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer"
+                        >
+                          Forgot Password?
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Real-time Dynamic Password Validation Checklist (Registration only) */}
+                    {mode === "signup" && (
+                      <div className="mt-2.5 p-3 rounded-lg bg-gray-50 border border-gray-200">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 mb-2">
+                          Password Requirements
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                          {passwordCriteria.map((c) => (
+                            <div
+                              key={c.id}
+                              className={`flex items-center gap-2 transition-colors duration-200 ${
                                 c.isValid
-                                  ? "bg-emerald-500 text-white font-bold"
-                                  : "bg-gray-200 text-transparent border border-gray-300"
+                                  ? "text-emerald-700 font-medium"
+                                  : "text-gray-400"
                               }`}
                             >
-                              ✓
-                            </span>
-                            <span>{c.label}</span>
-                          </div>
-                        ))}
+                              <span
+                                className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] shrink-0 transition-colors duration-200 ${
+                                  c.isValid
+                                    ? "bg-emerald-500 text-white font-bold"
+                                    : "bg-gray-200 text-transparent border border-gray-300"
+                                }`}
+                              >
+                                ✓
+                              </span>
+                              <span>{c.label}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                )}
 
                 <button
                   type="submit"
-                  disabled={loading || (mode === "signup" && !isPasswordValid)}
+                  disabled={
+                    loading ||
+                    (mode === "signup" && !isPasswordValid) ||
+                    (mode === "forgot_password" && !email.trim())
+                  }
                   className={`w-full mt-2 py-3 px-4 rounded-lg font-semibold text-sm shadow-sm transition-all duration-150 flex items-center justify-center gap-2 ${
-                    loading || (mode === "signup" && !isPasswordValid)
+                    loading ||
+                    (mode === "signup" && !isPasswordValid) ||
+                    (mode === "forgot_password" && !email.trim())
                       ? "bg-gray-200 text-gray-400 border border-gray-300 cursor-not-allowed"
                       : "bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
                   }`}
@@ -627,6 +706,8 @@ export const Landing: React.FC = () => {
                       </svg>
                       <span>Processing...</span>
                     </>
+                  ) : mode === "forgot_password" ? (
+                    "Send Password Reset Link"
                   ) : mode === "signin" ? (
                     "Sign In to Dashboard"
                   ) : (
@@ -637,7 +718,22 @@ export const Landing: React.FC = () => {
 
               {/* Footer switcher */}
               <div className="mt-5 text-center text-xs text-gray-500">
-                {mode === "signin" ? (
+                {mode === "forgot_password" ? (
+                  <>
+                    Remember your password?{" "}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMode("signin");
+                        setErrorMessage(null);
+                        setSuccessMessage(null);
+                      }}
+                      className="font-semibold text-emerald-600 hover:text-emerald-700 underline cursor-pointer"
+                    >
+                      Return to Sign In
+                    </button>
+                  </>
+                ) : mode === "signin" ? (
                   <>
                     Don't have an account yet?{" "}
                     <button
@@ -647,7 +743,7 @@ export const Landing: React.FC = () => {
                         setErrorMessage(null);
                         setSuccessMessage(null);
                       }}
-                      className="font-semibold text-emerald-600 hover:text-emerald-700 underline"
+                      className="font-semibold text-emerald-600 hover:text-emerald-700 underline cursor-pointer"
                     >
                       Register here
                     </button>
@@ -662,7 +758,7 @@ export const Landing: React.FC = () => {
                         setErrorMessage(null);
                         setSuccessMessage(null);
                       }}
-                      className="font-semibold text-emerald-600 hover:text-emerald-700 underline"
+                      className="font-semibold text-emerald-600 hover:text-emerald-700 underline cursor-pointer"
                     >
                       Sign in here
                     </button>

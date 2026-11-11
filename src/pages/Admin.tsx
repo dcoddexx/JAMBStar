@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
-import { fetchSystemSettings, updateSystemSettings, type SystemSettings } from '../services/systemSettings'
+import {
+  fetchSystemSettings,
+  updateSystemSettings,
+  isoToLocalInputValue,
+  type SystemSettings,
+} from '../services/systemSettings'
 
 export interface Profile {
   id: string
@@ -283,6 +288,7 @@ export const Admin: React.FC = () => {
     id: 'global',
     is_maintenance: false,
     maintenance_message: '',
+    maintenance_auto_on_at: null,
     maintenance_auto_off_at: null,
     updated_at: '',
   })
@@ -2091,6 +2097,7 @@ export const Admin: React.FC = () => {
       const res = await updateSystemSettings({
         is_maintenance: maintenanceSettings.is_maintenance,
         maintenance_message: maintenanceSettings.maintenance_message.trim(),
+        maintenance_auto_on_at: maintenanceSettings.maintenance_auto_on_at || null,
         maintenance_auto_off_at: maintenanceSettings.maintenance_auto_off_at || null,
       })
 
@@ -2115,16 +2122,25 @@ export const Admin: React.FC = () => {
     }
   }
 
-  const handleSetAutoOffPreset = (minutes: number | null) => {
+  // Quick Presets: set target date to now + minutes
+  const handleSetMaintenancePreset = (field: 'on' | 'off', minutes: number | null) => {
+    const key = field === 'on' ? 'maintenance_auto_on_at' : 'maintenance_auto_off_at'
     if (minutes === null) {
-      setMaintenanceSettings((prev) => ({ ...prev, maintenance_auto_off_at: null }))
+      setMaintenanceSettings((prev) => ({ ...prev, [key]: null }))
       return
     }
     const targetDate = new Date(Date.now() + minutes * 60 * 1000)
-    const localIso = new Date(targetDate.getTime() - targetDate.getTimezoneOffset() * 60000)
-      .toISOString()
-      .slice(0, 16)
-    setMaintenanceSettings((prev) => ({ ...prev, maintenance_auto_off_at: localIso }))
+    setMaintenanceSettings((prev) => ({ ...prev, [key]: targetDate.toISOString() }))
+  }
+
+  // Delta fine-tuning: shifts existing datetime by deltaMinutes (positive or negative)
+  // If empty, starts from now + deltaMinutes
+  const handleDeltaAdjust = (field: 'on' | 'off', deltaMinutes: number) => {
+    const key = field === 'on' ? 'maintenance_auto_on_at' : 'maintenance_auto_off_at'
+    const currentVal = maintenanceSettings[key]
+    const baseTime = currentVal ? new Date(currentVal).getTime() : Date.now()
+    const targetDate = new Date(baseTime + deltaMinutes * 60 * 1000)
+    setMaintenanceSettings((prev) => ({ ...prev, [key]: targetDate.toISOString() }))
   }
 
   // ---------------------------------------------------------------------------
@@ -4389,16 +4405,91 @@ export const Admin: React.FC = () => {
                     </p>
                   </div>
 
-                  {/* Scheduled Auto-Off */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="block text-xs font-bold text-gray-700 uppercase">
-                        Scheduled Auto-Off (Optional Expiration)
-                      </label>
+                  {/* 1. Scheduled Start Time (Auto-ON) */}
+                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-800 uppercase tracking-wider">
+                          1. Scheduled Start Time (Auto-ON)
+                        </label>
+                        <p className="text-[11px] text-gray-500">
+                          Automatically switches system to maintenance mode at this time.
+                        </p>
+                      </div>
+                      {maintenanceSettings.maintenance_auto_on_at && (
+                        <button
+                          type="button"
+                          onClick={() => handleSetMaintenancePreset('on', null)}
+                          className="text-[11px] font-semibold text-rose-600 hover:underline cursor-pointer"
+                        >
+                          Clear Start
+                        </button>
+                      )}
+                    </div>
+
+                    <input
+                      type="datetime-local"
+                      value={isoToLocalInputValue(maintenanceSettings.maintenance_auto_on_at)}
+                      onChange={(e) =>
+                        setMaintenanceSettings({
+                          ...maintenanceSettings,
+                          maintenance_auto_on_at: e.target.value ? new Date(e.target.value).toISOString() : null,
+                        })
+                      }
+                      className="w-full px-3.5 py-2 border border-gray-300 rounded-xl text-xs sm:text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                    />
+
+                    {/* Quick Presets & Delta Fine-Tuning */}
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] uppercase font-bold text-gray-400 mr-1">Presets:</span>
+                        {[3, 5, 10, 15, 20, 30, 60].map((mins) => (
+                          <button
+                            key={mins}
+                            type="button"
+                            onClick={() => handleSetMaintenancePreset('on', mins)}
+                            className="px-2 py-0.5 rounded-md border border-gray-200 bg-white hover:bg-gray-100 text-[11px] font-semibold text-gray-700 cursor-pointer shadow-2xs"
+                          >
+                            +{mins < 60 ? `${mins}m` : '1h'}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] uppercase font-bold text-gray-400 mr-1">Fine-Tune:</span>
+                        {[-5, -3, 3, 5].map((delta) => (
+                          <button
+                            key={delta}
+                            type="button"
+                            onClick={() => handleDeltaAdjust('on', delta)}
+                            className={`px-2 py-0.5 rounded-md border text-[11px] font-mono font-bold cursor-pointer shadow-2xs ${
+                              delta < 0
+                                ? 'border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800'
+                                : 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                            }`}
+                          >
+                            {delta > 0 ? `+${delta}m` : `${delta}m`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 2. Scheduled Completion Time (Auto-OFF) */}
+                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-800 uppercase tracking-wider">
+                          2. Scheduled Completion Time (Auto-OFF)
+                        </label>
+                        <p className="text-[11px] text-gray-500">
+                          Automatically restores candidate practice access at this time.
+                        </p>
+                      </div>
                       {maintenanceSettings.maintenance_auto_off_at && (
                         <button
                           type="button"
-                          onClick={() => handleSetAutoOffPreset(null)}
+                          onClick={() => handleSetMaintenancePreset('off', null)}
                           className="text-[11px] font-semibold text-rose-600 hover:underline cursor-pointer"
                         >
                           Clear Expiration
@@ -4408,49 +4499,50 @@ export const Admin: React.FC = () => {
 
                     <input
                       type="datetime-local"
-                      value={
-                        maintenanceSettings.maintenance_auto_off_at
-                          ? maintenanceSettings.maintenance_auto_off_at.slice(0, 16)
-                          : ''
-                      }
+                      value={isoToLocalInputValue(maintenanceSettings.maintenance_auto_off_at)}
                       onChange={(e) =>
                         setMaintenanceSettings({
                           ...maintenanceSettings,
                           maintenance_auto_off_at: e.target.value ? new Date(e.target.value).toISOString() : null,
                         })
                       }
-                      className="w-full px-3.5 py-2 border border-gray-300 rounded-xl text-xs sm:text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      className="w-full px-3.5 py-2 border border-gray-300 rounded-xl text-xs sm:text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
                     />
 
-                    {/* Quick Preset Buttons */}
-                    <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                      <span className="text-[11px] text-gray-400 mr-1">Quick Presets:</span>
-                      <button
-                        type="button"
-                        onClick={() => handleSetAutoOffPreset(30)}
-                        className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-[11px] font-semibold text-gray-700 cursor-pointer"
-                      >
-                        +30 Mins
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleSetAutoOffPreset(60)}
-                        className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-[11px] font-semibold text-gray-700 cursor-pointer"
-                      >
-                        +1 Hour
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleSetAutoOffPreset(120)}
-                        className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-[11px] font-semibold text-gray-700 cursor-pointer"
-                      >
-                        +2 Hours
-                      </button>
-                    </div>
+                    {/* Quick Presets & Delta Fine-Tuning */}
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] uppercase font-bold text-gray-400 mr-1">Presets:</span>
+                        {[3, 5, 10, 15, 20, 30, 60].map((mins) => (
+                          <button
+                            key={mins}
+                            type="button"
+                            onClick={() => handleSetMaintenancePreset('off', mins)}
+                            className="px-2 py-0.5 rounded-md border border-gray-200 bg-white hover:bg-gray-100 text-[11px] font-semibold text-gray-700 cursor-pointer shadow-2xs"
+                          >
+                            +{mins < 60 ? `${mins}m` : '1h'}
+                          </button>
+                        ))}
+                      </div>
 
-                    <p className="text-[11px] text-gray-400 mt-1">
-                      The system will automatically restore candidate practice access when this timestamp arrives.
-                    </p>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] uppercase font-bold text-gray-400 mr-1">Fine-Tune:</span>
+                        {[-5, -3, 3, 5].map((delta) => (
+                          <button
+                            key={delta}
+                            type="button"
+                            onClick={() => handleDeltaAdjust('off', delta)}
+                            className={`px-2 py-0.5 rounded-md border text-[11px] font-mono font-bold cursor-pointer shadow-2xs ${
+                              delta < 0
+                                ? 'border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800'
+                                : 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                            }`}
+                          >
+                            {delta > 0 ? `+${delta}m` : `${delta}m`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
 
                   <div className="pt-3 border-t border-gray-100 flex items-center justify-between">
