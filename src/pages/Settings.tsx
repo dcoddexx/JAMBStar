@@ -31,6 +31,7 @@ export const Settings: React.FC = () => {
   // Monetization & Bank Details State
   const [monetizationStatus, setMonetizationStatus] = useState<'none' | 'invited' | 'active' | 'declined'>('none')
   const [referralCode, setReferralCode] = useState<string | null>(null)
+  const [currentRewardRate, setCurrentRewardRate] = useState<number>(250)
   const [bankName, setBankName] = useState<string>('')
   const [bankCode, setBankCode] = useState<string>('')
   const [accountNumber, setAccountNumber] = useState<string>('')
@@ -63,7 +64,7 @@ export const Settings: React.FC = () => {
 
         const { data: profile, error } = await supabase
           .from('profiles')
-          .select('full_name, track, gender, avatar_url, role, monetization_status, referral_code, bank_name, bank_code, account_number, account_name, bank_details_updated_at')
+          .select('full_name, track, gender, avatar_url, role, monetization_status, referral_code, current_reward_rate, bank_name, bank_code, account_number, account_name, bank_details_updated_at')
           .eq('id', user.id)
           .maybeSingle()
 
@@ -77,6 +78,7 @@ export const Settings: React.FC = () => {
           if (profile.role) setRole(profile.role)
           if (profile.monetization_status) setMonetizationStatus(profile.monetization_status)
           if (profile.referral_code) setReferralCode(profile.referral_code)
+          if ((profile as any).current_reward_rate) setCurrentRewardRate(Number((profile as any).current_reward_rate) || 250)
           if (profile.bank_name) setBankName(profile.bank_name)
           if (profile.bank_code) setBankCode(profile.bank_code)
           if (profile.account_number) setAccountNumber(profile.account_number)
@@ -780,8 +782,8 @@ export const Settings: React.FC = () => {
               </div>
             </div>
             <div className="text-xs text-emerald-900 sm:text-right">
-              <span className="font-semibold">Earn ₦200 per Pro upgrade</span>
-              <div className="text-[11px] text-emerald-700">Minimum payout: ₦1,000 (5 referrals)</div>
+              <span className="font-semibold">Earn ₦{currentRewardRate} per Pro upgrade</span>
+              <div className="text-[11px] text-emerald-700">Minimum payout: ₦500 (2 referrals)</div>
             </div>
           </div>
         ) : monetizationStatus === 'invited' ? (

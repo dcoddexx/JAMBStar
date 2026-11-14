@@ -29,6 +29,9 @@ export interface Database {
           monetization_status: 'none' | 'invited' | 'active' | 'declined'
           monetization_invited_at: string | null
           referral_code: string | null
+          referred_by: string | null
+          current_reward_rate: number
+          pending_tier_offer: number | null
           bank_name: string | null
           bank_code: string | null
           account_number: string | null
@@ -57,6 +60,9 @@ export interface Database {
           monetization_status?: 'none' | 'invited' | 'active' | 'declined'
           monetization_invited_at?: string | null
           referral_code?: string | null
+          referred_by?: string | null
+          current_reward_rate?: number
+          pending_tier_offer?: number | null
           bank_name?: string | null
           bank_code?: string | null
           account_number?: string | null
@@ -85,6 +91,9 @@ export interface Database {
           monetization_status?: 'none' | 'invited' | 'active' | 'declined'
           monetization_invited_at?: string | null
           referral_code?: string | null
+          referred_by?: string | null
+          current_reward_rate?: number
+          pending_tier_offer?: number | null
           bank_name?: string | null
           bank_code?: string | null
           account_number?: string | null
@@ -381,6 +390,7 @@ export interface Database {
           referred_id: string
           reward_amount: number
           status: 'pending' | 'completed' | 'cancelled'
+          payment_reference: string | null
           created_at: string
         }
         Insert: {
@@ -389,6 +399,7 @@ export interface Database {
           referred_id: string
           reward_amount?: number
           status?: 'pending' | 'completed' | 'cancelled'
+          payment_reference?: string | null
           created_at?: string
         }
         Update: {
@@ -397,6 +408,7 @@ export interface Database {
           referred_id?: string
           reward_amount?: number
           status?: 'pending' | 'completed' | 'cancelled'
+          payment_reference?: string | null
           created_at?: string
         }
       }
@@ -476,6 +488,172 @@ export interface Database {
           updated_at?: string
         }
       }
+      payments: {
+        Row: {
+          id: string
+          user_id: string
+          reference: string
+          amount: number
+          currency: string
+          plan: string
+          status: string
+          gateway_response: Json | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          reference: string
+          amount: number
+          currency?: string
+          plan?: string
+          status?: string
+          gateway_response?: Json | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          reference?: string
+          amount?: number
+          currency?: string
+          plan?: string
+          status?: string
+          gateway_response?: Json | null
+          created_at?: string
+        }
+      }
+      wallet_transactions: {
+        Row: {
+          id: string
+          user_id: string
+          type: 'commission_credit' | 'withdrawal_debit' | 'withdrawal_refund'
+          amount: number
+          balance_before: number
+          balance_after: number
+          reference: string | null
+          description: string
+          metadata: Json | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          type: 'commission_credit' | 'withdrawal_debit' | 'withdrawal_refund'
+          amount: number
+          balance_before: number
+          balance_after: number
+          reference?: string | null
+          description: string
+          metadata?: Json | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          type?: 'commission_credit' | 'withdrawal_debit' | 'withdrawal_refund'
+          amount?: number
+          balance_before?: number
+          balance_after?: number
+          reference?: string | null
+          description?: string
+          metadata?: Json | null
+          created_at?: string
+        }
+      }
+      monetization_audit_logs: {
+        Row: {
+          id: string
+          actor_id: string | null
+          target_user_id: string
+          event_type: string
+          details: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          actor_id?: string | null
+          target_user_id: string
+          event_type: string
+          details?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          actor_id?: string | null
+          target_user_id?: string
+          event_type?: string
+          details?: Json
+          created_at?: string
+        }
+      }
+    }
+    Functions: {
+      validate_referral_code: {
+        Args: {
+          p_code: string
+        }
+        Returns: {
+          valid: boolean
+          referrer_name: string | null
+        }
+      }
+      get_my_referrals: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          id: string
+          referred_id: string
+          candidate_name: string
+          reward_amount: number
+          status: string
+          created_at: string
+        }[]
+      }
+      process_verified_pro_upgrade: {
+        Args: {
+          p_user_id: string
+          p_reference: string
+          p_amount: number
+          p_gateway_response?: Json
+        }
+        Returns: {
+          success: boolean
+          already_processed: boolean
+        }
+      }
+      accept_monetization_tier_offer: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          success: boolean
+          new_rate?: number
+          message?: string
+        }
+      }
+      request_affiliate_payout: {
+        Args: {
+          p_amount: number
+        }
+        Returns: {
+          success: boolean
+          payout_id?: string
+          new_balance?: number
+          message?: string
+        }
+      }
+      admin_process_payout: {
+        Args: {
+          p_payout_id: string
+          p_action: 'approve' | 'reject'
+          p_notes?: string | null
+        }
+        Returns: {
+          success: boolean
+          action?: string
+          refunded_amount?: number
+          message?: string
+        }
+      }
     }
   }
 }
+

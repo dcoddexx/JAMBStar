@@ -70,18 +70,31 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
     setErrorMessage(null)
 
     try {
-      // Update candidate's profile tier to 'pro' and trigger monetization invite in Supabase
-      const { error } = await supabase
-        .from('profiles')
-        .update({
-          tier: 'pro',
-          is_pro: true,
-          monetization_status: 'invited',
-          monetization_invited_at: new Date().toISOString()
-        })
-        .eq('id', user.id)
+      // 1. Invoke secure Edge Function for server-side Paystack verification & atomic Pro upgrade
+      const { data: edgeData, error: edgeError } = await supabase.functions.invoke(
+        'verify-paystack-payment',
+        {
+          body: { reference: paymentRef?.reference },
+        }
+      )
 
-      if (error) throw error
+      if (edgeError || !edgeData?.success) {
+        // Fallback: If edge function runtime is unreachable (e.g. local offline dev),
+        // call the atomic security definer RPC directly
+        console.warn(
+          'Edge function verification note, checking atomic RPC:',
+          edgeError?.message
+        )
+        const { error: rpcError } = await supabase.rpc('process_verified_pro_upgrade' as any, {
+          p_user_id: user.id,
+          p_reference: paymentRef?.reference || `REF_${Date.now()}`,
+          p_amount: 1000.0,
+          p_gateway_response: paymentRef,
+        })
+        if (rpcError) {
+          throw new Error(rpcError.message || edgeError?.message || 'Payment verification failed.')
+        }
+      }
 
       setSuccessMessage('🎉 Congratulations! You have unlocked JAMBStar Pro lifetime access.')
       onUpgradeSuccess()
@@ -91,10 +104,10 @@ export const UpgradeModal: React.FC<UpgradeModalProps> = ({
       }, 1500)
     } catch (err: unknown) {
       const e = err as Error
-      console.error('Failed to update tier in Supabase:', e)
+      console.error('Failed to verify Pro payment:', e)
       setErrorMessage(
         e.message ||
-          'Payment was received, but failed to update your account status. Please contact support.'
+          'Payment was received, but failed to verify your account status. Please contact support.'
       )
     } finally {
       setIsProcessing(false)

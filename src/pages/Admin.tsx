@@ -163,6 +163,10 @@ export const Admin: React.FC = () => {
   const [adminPayouts, setAdminPayouts] = useState<any[]>([])
   const [adminWallets, setAdminWallets] = useState<any[]>([])
   const [adminReferrals, setAdminReferrals] = useState<any[]>([])
+  const [adminAuditLogs, setAdminAuditLogs] = useState<any[]>([])
+  const [adminTransactions, setAdminTransactions] = useState<any[]>([])
+  const [auditEventFilter, setAuditEventFilter] = useState<string>('all')
+  const [ledgerTypeFilter, setLedgerTypeFilter] = useState<string>('all')
   const [loadingAdminMonetization, setLoadingAdminMonetization] = useState<boolean>(false)
   const [payoutStatusFilter, setPayoutStatusFilter] = useState<'all' | 'pending' | 'completed' | 'rejected'>('all')
   const [payoutProcessingId, setPayoutProcessingId] = useState<string | null>(null)
@@ -1077,6 +1081,22 @@ export const Admin: React.FC = () => {
         .order('created_at', { ascending: false })
 
       if (referralsData) setAdminReferrals(referralsData)
+
+      const { data: logsData } = await supabase
+        .from('monetization_audit_logs' as any)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100)
+
+      if (logsData) setAdminAuditLogs(logsData)
+
+      const { data: txData } = await supabase
+        .from('wallet_transactions' as any)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100)
+
+      if (txData) setAdminTransactions(txData)
     } catch (err) {
       console.warn('Error fetching admin monetization data:', err)
     } finally {
@@ -1213,22 +1233,22 @@ export const Admin: React.FC = () => {
     }
   }
 
-  // Payout Actions
+  // Payout Actions using atomic SECURITY DEFINER RPC
   const handleApprovePayout = async (payoutId: string) => {
     setPayoutProcessingId(payoutId)
     try {
       const nowIso = new Date().toISOString()
-      const { error } = await supabase
-        .from('payouts')
-        .update({
-          status: 'completed',
-          processed_at: nowIso,
-          processed_by: currentUser?.id || null,
-          updated_at: nowIso,
-        })
-        .eq('id', payoutId)
+      const { data, error } = await supabase.rpc('admin_process_payout', {
+        p_payout_id: payoutId,
+        p_action: 'approve',
+        p_notes: 'Approved by admin',
+      })
 
       if (error) throw error
+      const res = data as any
+      if (res && res.success === false) {
+        throw new Error(res.message || 'Failed to approve payout')
+      }
 
       setAdminPayouts((prev) =>
         prev.map((p) =>
@@ -1239,6 +1259,7 @@ export const Admin: React.FC = () => {
       )
       setProfileActionMsg({ type: 'success', text: 'Payout request marked as completed.' })
       setTimeout(() => setProfileActionMsg(null), 3000)
+      fetchAdminMonetizationData()
     } catch (err: unknown) {
       const e = err as Error
       setProfileActionMsg({ type: 'error', text: `Failed to approve payout: ${e.message}` })
@@ -1254,39 +1275,16 @@ export const Admin: React.FC = () => {
     setPayoutProcessingId(payout.id)
     try {
       const nowIso = new Date().toISOString()
+      const { data, error } = await supabase.rpc('admin_process_payout', {
+        p_payout_id: payout.id,
+        p_action: 'reject',
+        p_notes: reason,
+      })
 
-      // 1. Mark payout as rejected
-      const { error: payoutErr } = await supabase
-        .from('payouts')
-        .update({
-          status: 'rejected',
-          notes: reason,
-          processed_at: nowIso,
-          processed_by: currentUser?.id || null,
-          updated_at: nowIso,
-        })
-        .eq('id', payout.id)
-
-      if (payoutErr) throw payoutErr
-
-      // 2. Refund amount to candidate wallet
-      const { data: candWallet } = await supabase
-        .from('wallets')
-        .select('balance, total_withdrawn')
-        .eq('user_id', payout.user_id)
-        .maybeSingle()
-
-      if (candWallet) {
-        const refundedBal = (candWallet.balance || 0) + payout.amount
-        const adjustedWithdrawn = Math.max(0, (candWallet.total_withdrawn || 0) - payout.amount)
-        await supabase
-          .from('wallets')
-          .update({
-            balance: refundedBal,
-            total_withdrawn: adjustedWithdrawn,
-            updated_at: nowIso,
-          })
-          .eq('user_id', payout.user_id)
+      if (error) throw error
+      const res = data as any
+      if (res && res.success === false) {
+        throw new Error(res.message || 'Failed to reject payout')
       }
 
       setAdminPayouts((prev) =>
@@ -4818,7 +4816,7 @@ export const Admin: React.FC = () => {
                   </div>
                   <div className="text-2xl font-black text-gray-900 font-mono">
                     ₦{adminReferrals
-                      .reduce((sum, r) => sum + (Number(r.reward_amount) || 200), 0)
+                      .reduce((sum, r) => sum + (Number(r.reward_amount) || 250), 0)
                       .toLocaleString()}
                   </div>
                   <div className="text-[11px] text-gray-500">
@@ -5030,6 +5028,214 @@ export const Admin: React.FC = () => {
                             </tr>
                           )
                         })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Wallet Financial Ledger (All Affiliates) */}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden space-y-4 p-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
+                  <div>
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900 flex items-center gap-2">
+                      <span>📜</span>
+                      <span>Global Wallet Transactions Ledger</span>
+                    </h3>
+                    <p className="text-xs text-gray-500">
+                      Immutable double-entry financial ledger of all candidate credits, debits, and refund transactions.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="font-semibold text-gray-500">Type:</span>
+                    <select
+                      value={ledgerTypeFilter}
+                      onChange={(e) => setLedgerTypeFilter(e.target.value)}
+                      className="px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="all">All Types ({adminTransactions.length})</option>
+                      <option value="commission_credit">Commission Credits</option>
+                      <option value="withdrawal_debit">Withdrawal Debits</option>
+                      <option value="withdrawal_refund">Withdrawal Refunds</option>
+                    </select>
+                  </div>
+                </div>
+
+                {adminTransactions.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-gray-400">
+                    No wallet ledger records recorded yet.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs sm:text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[11px]">
+                        <tr>
+                          <th className="py-3 px-4">Date & Time</th>
+                          <th className="py-3 px-4">Candidate</th>
+                          <th className="py-3 px-4">Type</th>
+                          <th className="py-3 px-4">Description / Reference</th>
+                          <th className="py-3 px-4 text-right">Amount</th>
+                          <th className="py-3 px-4 text-right">Balance After</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {adminTransactions
+                          .filter((tx) => ledgerTypeFilter === 'all' || tx.type === ledgerTypeFilter)
+                          .map((tx) => {
+                            const candidate = profiles.find((prof) => prof.id === tx.user_id)
+                            const isCredit = tx.type === 'commission_credit' || tx.type === 'withdrawal_refund'
+                            return (
+                              <tr key={tx.id} className="hover:bg-gray-50/70 transition-colors">
+                                <td className="py-3 px-4 font-mono text-[11px] text-gray-500 whitespace-nowrap">
+                                  {new Date(tx.created_at).toLocaleDateString('en-GB', {
+                                    day: 'numeric',
+                                    month: 'short',
+                                    year: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="font-semibold text-gray-900">
+                                    {candidate?.full_name || 'Candidate'}
+                                  </div>
+                                  <div className="text-[10px] font-mono text-gray-400">
+                                    ID: {tx.user_id.slice(0, 8)}...
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span
+                                    className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                      tx.type === 'commission_credit'
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : tx.type === 'withdrawal_debit'
+                                        ? 'bg-rose-100 text-rose-800'
+                                        : 'bg-blue-100 text-blue-800'
+                                    }`}
+                                  >
+                                    {tx.type.replace('_', ' ')}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4 max-w-xs text-xs text-gray-700">
+                                  <div>{tx.description}</div>
+                                  {tx.reference && (
+                                    <div className="text-[10px] text-gray-400 font-mono truncate">{tx.reference}</div>
+                                  )}
+                                </td>
+                                <td className={`py-3 px-4 text-right font-mono font-bold whitespace-nowrap ${isCredit ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                  {isCredit ? '+' : '-'}₦{Number(tx.amount).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+                                </td>
+                                <td className="py-3 px-4 text-right font-mono text-gray-900 whitespace-nowrap">
+                                  ₦{Number(tx.balance_after).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+                                </td>
+                              </tr>
+                            )
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Monetization & System Audit Trail */}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden space-y-4 p-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
+                  <div>
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900 flex items-center gap-2">
+                      <span>🛡️</span>
+                      <span>Monetization & Affiliate Audit Trail</span>
+                    </h3>
+                    <p className="text-xs text-gray-500">
+                      System-generated audit logs of all invite acceptances, referral signups, milestone tier changes, and payout lifecycle actions.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="font-semibold text-gray-500">Event:</span>
+                    <select
+                      value={auditEventFilter}
+                      onChange={(e) => setAuditEventFilter(e.target.value)}
+                      className="px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="all">All Events ({adminAuditLogs.length})</option>
+                      <option value="INVITE_ACCEPTED">INVITE_ACCEPTED</option>
+                      <option value="REFERRAL_REGISTERED">REFERRAL_REGISTERED</option>
+                      <option value="COMMISSION_CREDITED">COMMISSION_CREDITED</option>
+                      <option value="TIER_OFFER_UNLOCKED">TIER_OFFER_UNLOCKED</option>
+                      <option value="TIER_OFFER_ACCEPTED">TIER_OFFER_ACCEPTED</option>
+                      <option value="WITHDRAWAL_REQUESTED">WITHDRAWAL_REQUESTED</option>
+                      <option value="WITHDRAWAL_APPROVED">WITHDRAWAL_APPROVED</option>
+                      <option value="WITHDRAWAL_REJECTED">WITHDRAWAL_REJECTED</option>
+                    </select>
+                  </div>
+                </div>
+
+                {adminAuditLogs.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-gray-400">
+                    No monetization audit log records found.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs sm:text-sm">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[11px]">
+                        <tr>
+                          <th className="py-3 px-4">Timestamp</th>
+                          <th className="py-3 px-4">Event Type</th>
+                          <th className="py-3 px-4">Target Candidate</th>
+                          <th className="py-3 px-4">Event Details & Metadata</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {adminAuditLogs
+                          .filter((log) => auditEventFilter === 'all' || log.event_type === auditEventFilter)
+                          .map((log) => {
+                            const target = profiles.find((prof) => prof.id === log.target_user_id)
+                            return (
+                              <tr key={log.id} className="hover:bg-gray-50/70 transition-colors">
+                                <td className="py-3 px-4 font-mono text-[11px] text-gray-500 whitespace-nowrap">
+                                  {new Date(log.created_at).toLocaleDateString('en-GB', {
+                                    day: 'numeric',
+                                    month: 'short',
+                                    year: 'numeric',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit',
+                                  })}
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span
+                                    className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                                      log.event_type === 'COMMISSION_CREDITED'
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : log.event_type.includes('TIER')
+                                        ? 'bg-purple-100 text-purple-800'
+                                        : log.event_type.includes('APPROVED')
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : log.event_type.includes('REJECTED')
+                                        ? 'bg-rose-100 text-rose-800'
+                                        : 'bg-amber-100 text-amber-800'
+                                    }`}
+                                  >
+                                    {log.event_type}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="font-semibold text-gray-900">
+                                    {target?.full_name || 'Candidate'}
+                                  </div>
+                                  <div className="text-[10px] font-mono text-gray-400">
+                                    ID: {log.target_user_id.slice(0, 8)}...
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4 text-xs font-mono text-gray-600 max-w-md truncate">
+                                  {typeof log.details === 'object'
+                                    ? JSON.stringify(log.details)
+                                    : String(log.details)}
+                                </td>
+                              </tr>
+                            )
+                          })}
                       </tbody>
                     </table>
                   </div>

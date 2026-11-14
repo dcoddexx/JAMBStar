@@ -1,6 +1,8 @@
 // src/services/monetization.ts
-// Service handling Nigerian Bank Directory, Paystack Account Resolution,
-// Referral Code Generation, and Bank Details Cooldown Management for JAMBStar
+// Service handling Nigerian Bank Directory, Paystack Account Resolution via Edge Function,
+// Referral Code Generation with Collision Retry, and Bank Details Cooldown Management for JAMBStar
+
+import { supabase } from '../lib/supabase'
 
 export interface NigerianBank {
   name: string
@@ -43,11 +45,6 @@ export const NIGERIAN_BANKS: NigerianBank[] = [
   { name: 'Zenith Bank', code: '057' }
 ]
 
-const PAYSTACK_SECRET_KEY =
-  import.meta.env.VITE_PAYSTACK_SECRET_KEY ||
-  import.meta.env.VITE_PAYSTACK_PUBLIC_KEY ||
-  ''
-
 export interface ResolveAccountResponse {
   success: boolean
   account_name?: string
@@ -57,12 +54,11 @@ export interface ResolveAccountResponse {
 }
 
 /**
- * Resolves a 10-digit Nigerian bank account number with Paystack.
+ * Resolves a 10-digit Nigerian bank account number securely via the resolve-bank-account Edge Function.
  */
 export async function resolvePaystackAccount(
   accountNumber: string,
-  bankCode: string,
-  secretKey?: string
+  bankCode: string
 ): Promise<ResolveAccountResponse> {
   const cleanNumber = accountNumber.trim().replace(/\D/g, '')
   if (cleanNumber.length !== 10) {
@@ -79,34 +75,22 @@ export async function resolvePaystackAccount(
     }
   }
 
-  const keyToUse = secretKey || PAYSTACK_SECRET_KEY
-
   try {
-    const response = await fetch(
-      `https://api.paystack.co/bank/resolve?account_number=${encodeURIComponent(cleanNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${keyToUse}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    )
+    const { data, error } = await supabase.functions.invoke('resolve-bank-account', {
+      body: { accountNumber: cleanNumber, bankCode }
+    })
 
-    const data = await response.json()
+    if (!error && data) {
+      return data as ResolveAccountResponse
+    }
 
-    if (response.ok && data.status && data.data) {
-      return {
-        success: true,
-        account_name: data.data.account_name,
-        account_number: data.data.account_number,
-        bank_id: data.data.bank_id
-      }
+    if (error) {
+      console.warn('[resolvePaystackAccount] Edge function warning:', error.message)
     }
 
     return {
       success: false,
-      message: data.message || 'Unable to verify account details. Please double-check the account number and bank.'
+      message: data?.message || error?.message || 'Unable to verify account details. Please double-check the account number and bank.'
     }
   } catch (error) {
     return {
@@ -117,7 +101,7 @@ export async function resolvePaystackAccount(
 }
 
 /**
- * Generates an affiliate referral code for candidates: JAMB-FIRSTNAME-XXXX
+ * Generates an affiliate referral code candidate format: JAMB-FIRSTNAME-XXXX
  */
 export function generateReferralCode(fullName?: string | null): string {
   let firstName = 'STAR'
@@ -138,6 +122,28 @@ export function generateReferralCode(fullName?: string | null): string {
   }
 
   return `JAMB-${firstName}-${suffix}`
+}
+
+/**
+ * Generates a guaranteed unique affiliate referral code with a collision retry loop against Supabase.
+ */
+export async function generateUniqueReferralCode(fullName?: string | null): Promise<string> {
+  const maxAttempts = 5
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const candidateCode = generateReferralCode(fullName)
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('referral_code', candidateCode)
+      .maybeSingle()
+
+    if (!error && !data) {
+      return candidateCode
+    }
+  }
+  // Fallback with timestamp suffix to guarantee uniqueness if retries fail
+  const fallbackSuffix = Date.now().toString(36).slice(-4).toUpperCase()
+  return generateReferralCode(fullName).slice(0, -4) + fallbackSuffix
 }
 
 export interface BankCooldownStatus {

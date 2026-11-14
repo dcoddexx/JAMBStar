@@ -14,6 +14,7 @@ import Admin from "./pages/Admin";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import TermsOfService from "./pages/TermsOfService";
 import Contact from "./pages/Contact";
+import Pricing from "./pages/Pricing";
 import Settings from "./pages/Settings";
 import ResetPassword from "./pages/ResetPassword";
 import Navbar, { normalizeRole, isUserAdmin } from "./components/Navbar";
@@ -339,6 +340,9 @@ const App: React.FC = () => {
               }
             />
 
+            {/* Pricing & Subscription Page */}
+            <Route path="/pricing" element={<Pricing />} />
+
             {/* Google AdSense Compliance & Legal Pages */}
             <Route path="/privacy" element={<PrivacyPolicy />} />
             <Route path="/terms" element={<TermsOfService />} />
@@ -358,6 +362,9 @@ const App: React.FC = () => {
               <span>JAMB UTME CBT Preparation System</span>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6 font-medium text-slate-600">
+              <Link to="/pricing" className="hover:text-emerald-600 transition-colors">
+                Pricing
+              </Link>
               <Link to="/privacy" className="hover:text-emerald-600 transition-colors">
                 Privacy Policy
               </Link>

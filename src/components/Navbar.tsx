@@ -367,6 +367,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   // Standard dashboard link is replaced by the dynamic User Avatar on the right
   const navLinks = [
     { name: "Home", path: "/" },
+    { name: "Pricing", path: "/pricing" },
     ...(currentUser ? [{ name: "CBT Quiz", path: "/dashboard?setup=true" }] : []),
     ...(hasAdminAccess ? [{ name: "Admin Portal", path: "/admin" }] : []),
     { name: "Contact", path: "/contact" },

@@ -7,7 +7,7 @@ import { CBTSetupModal } from '../components/CBTSetupModal'
 import {
   NIGERIAN_BANKS,
   resolvePaystackAccount,
-  generateReferralCode,
+  generateUniqueReferralCode,
 } from '../services/monetization'
 
 export interface Subject {
@@ -94,6 +94,28 @@ export interface ReferralData {
   created_at: string
 }
 
+export interface ReferralWithCandidate {
+  id: string
+  referred_id: string
+  candidate_name: string
+  reward_amount: number
+  status: 'pending' | 'completed' | 'cancelled' | string
+  created_at: string
+}
+
+export interface WalletTransactionData {
+  id: string
+  user_id: string
+  type: 'commission_credit' | 'withdrawal_debit' | 'withdrawal_refund'
+  amount: number
+  balance_before: number
+  balance_after: number
+  reference: string | null
+  description: string
+  metadata: any
+  created_at: string
+}
+
 type DashboardTab = 'cbt' | 'messages' | 'notices' | 'monetization'
 
 export const Dashboard: React.FC = () => {
@@ -121,9 +143,12 @@ export const Dashboard: React.FC = () => {
   const [quizHistory, setQuizHistory] = useState<QuizResultHistory[]>([])
   const [loadingHistory, setLoadingHistory] = useState<boolean>(true)
 
-  // Monetization & Payout State
+  // Monetization, Tiers & Payout State
   const [monetizationStatus, setMonetizationStatus] = useState<'none' | 'invited' | 'active' | 'declined'>('none')
   const [referralCode, setReferralCode] = useState<string | null>(null)
+  const [currentRewardRate, setCurrentRewardRate] = useState<number>(250)
+  const [pendingTierOffer, setPendingTierOffer] = useState<number | null>(null)
+  const [acceptingOffer, setAcceptingOffer] = useState<boolean>(false)
   const [bankName, setBankName] = useState<string | null>(null)
   const [bankCode, setBankCode] = useState<string | null>(null)
   const [accountNumber, setAccountNumber] = useState<string | null>(null)
@@ -133,6 +158,8 @@ export const Dashboard: React.FC = () => {
   const [wallet, setWallet] = useState<WalletData | null>(null)
   const [payouts, setPayouts] = useState<PayoutData[]>([])
   const [referrals, setReferrals] = useState<ReferralData[]>([])
+  const [detailedReferrals, setDetailedReferrals] = useState<ReferralWithCandidate[]>([])
+  const [walletTransactions, setWalletTransactions] = useState<WalletTransactionData[]>([])
   const [loadingMonetization, setLoadingMonetization] = useState<boolean>(false)
 
   // Candidate Opt-In / Invitation Modal State
@@ -152,7 +179,7 @@ export const Dashboard: React.FC = () => {
 
   // Payout Request Modal
   const [showPayoutModal, setShowPayoutModal] = useState<boolean>(false)
-  const [payoutAmount, setPayoutAmount] = useState<string>('1000')
+  const [payoutAmount, setPayoutAmount] = useState<string>('500')
   const [requestingPayout, setRequestingPayout] = useState<boolean>(false)
   const [payoutModalError, setPayoutModalError] = useState<string | null>(null)
   const [payoutSuccessMsg, setPayoutSuccessMsg] = useState<string | null>(null)
@@ -320,7 +347,7 @@ export const Dashboard: React.FC = () => {
       // Read profile for greeting, subscription tier, and monetization fields
       const { data: profile } = await supabase
         .from('profiles')
-        .select('full_name, track, tier, is_pro, monetization_status, referral_code, bank_name, bank_code, account_number, account_name, bank_details_updated_at, last_read_notices')
+        .select('full_name, track, tier, is_pro, monetization_status, referral_code, current_reward_rate, pending_tier_offer, bank_name, bank_code, account_number, account_name, bank_details_updated_at, last_read_notices')
         .eq('id', user.id)
         .maybeSingle()
 
@@ -347,6 +374,8 @@ export const Dashboard: React.FC = () => {
         }
       }
       if (profile?.referral_code) setReferralCode(profile.referral_code)
+      if (profile?.current_reward_rate) setCurrentRewardRate(Number(profile.current_reward_rate) || 250)
+      if (profile?.pending_tier_offer) setPendingTierOffer(Number(profile.pending_tier_offer))
       if (profile?.bank_name) setBankName(profile.bank_name)
       if (profile?.bank_code) setBankCode(profile.bank_code)
       if (profile?.account_number) setAccountNumber(profile.account_number)
@@ -574,6 +603,7 @@ export const Dashboard: React.FC = () => {
   const fetchWalletAndMonetization = async (userId: string) => {
     setLoadingMonetization(true)
     try {
+      // 1. Fetch wallet balance
       const { data: walletData } = await supabase
         .from('wallets')
         .select('*')
@@ -586,6 +616,7 @@ export const Dashboard: React.FC = () => {
         setWallet({ balance: 0, total_earned: 0, total_withdrawn: 0 })
       }
 
+      // 2. Fetch withdrawal payouts
       const { data: payoutData } = await supabase
         .from('payouts')
         .select('*')
@@ -594,17 +625,71 @@ export const Dashboard: React.FC = () => {
 
       if (payoutData) setPayouts(payoutData as PayoutData[])
 
-      const { data: referralData } = await supabase
-        .from('referrals')
+      // 3. Fetch transparent referrals with candidate names via get_my_referrals RPC
+      const { data: refRpcData, error: refRpcErr } = await supabase
+        .rpc('get_my_referrals' as any)
+
+      if (!refRpcErr && refRpcData) {
+        setDetailedReferrals(refRpcData as ReferralWithCandidate[])
+        setReferrals(refRpcData as any)
+      } else {
+        const { data: referralData } = await supabase
+          .from('referrals')
+          .select('*')
+          .eq('referrer_id', userId)
+          .order('created_at', { ascending: false })
+        if (referralData) setReferrals(referralData as ReferralData[])
+      }
+
+      // 4. Fetch wallet financial audit ledger
+      const { data: txData } = await supabase
+        .from('wallet_transactions')
         .select('*')
-        .eq('referrer_id', userId)
+        .eq('user_id', userId)
         .order('created_at', { ascending: false })
 
-      if (referralData) setReferrals(referralData as ReferralData[])
+      if (txData) setWalletTransactions(txData as WalletTransactionData[])
+
+      // 5. Refresh current reward rate and milestone tier offer
+      const { data: profRate } = await supabase
+        .from('profiles')
+        .select('current_reward_rate, pending_tier_offer')
+        .eq('id', userId)
+        .maybeSingle()
+
+      if (profRate?.current_reward_rate) setCurrentRewardRate(Number(profRate.current_reward_rate) || 250)
+      if (profRate?.pending_tier_offer !== undefined) {
+        setPendingTierOffer(profRate.pending_tier_offer ? Number(profRate.pending_tier_offer) : null)
+      }
     } catch (err) {
       console.warn('Error fetching monetization details:', err)
     } finally {
       setLoadingMonetization(false)
+    }
+  }
+
+  // Accept Milestone Tier Offer
+  const handleAcceptTierOffer = async () => {
+    if (!currentUser) return
+    setAcceptingOffer(true)
+    try {
+      const { data, error } = await supabase.rpc('accept_monetization_tier_offer' as any)
+      if (error) throw error
+      const res = data as { success: boolean; new_rate?: number; message?: string }
+      if (res && res.success && res.new_rate) {
+        setCurrentRewardRate(res.new_rate)
+        setPendingTierOffer(null)
+        setPaystackAlert(`🎉 Congratulations! Your reward rate has been upgraded to ₦${res.new_rate} per Pro referral!`)
+        setTimeout(() => setPaystackAlert(null), 6000)
+        fetchWalletAndMonetization(currentUser.id)
+      } else {
+        alert(res?.message || 'Could not activate tier offer.')
+      }
+    } catch (err: unknown) {
+      const e = err as Error
+      alert('Failed to accept tier offer: ' + e.message)
+    } finally {
+      setAcceptingOffer(false)
     }
   }
 
@@ -613,7 +698,7 @@ export const Dashboard: React.FC = () => {
     if (!currentUser) return
     setAcceptingInvite(true)
     try {
-      const code = generateReferralCode(currentUser.full_name)
+      const code = await generateUniqueReferralCode(currentUser.full_name)
       const nowIso = new Date().toISOString()
 
       const { error: profErr } = await supabase
@@ -818,8 +903,8 @@ export const Dashboard: React.FC = () => {
   const handleSubmitPayout = async () => {
     if (!currentUser || !wallet) return
     const amt = parseFloat(payoutAmount)
-    if (isNaN(amt) || amt < 1000) {
-      setPayoutModalError('Minimum withdrawal amount is ₦1,000.')
+    if (isNaN(amt) || amt < 500) {
+      setPayoutModalError('Minimum withdrawal amount is ₦500.')
       return
     }
     if (amt > wallet.balance) {
@@ -834,37 +919,16 @@ export const Dashboard: React.FC = () => {
     setRequestingPayout(true)
     setPayoutModalError(null)
     try {
-      const nowIso = new Date().toISOString()
-      const ref = `PAYOUT_${currentUser.id.slice(0, 6)}_${Date.now()}`
-
-      const { error: payoutErr } = await supabase.from('payouts').insert({
-        user_id: currentUser.id,
-        amount: amt,
-        bank_name: bankName,
-        bank_code: bankCode,
-        account_number: accountNumber,
-        account_name: accountName,
-        status: 'pending',
-        reference: ref,
+      const { data, error: payoutErr } = await supabase.rpc('request_affiliate_payout' as any, {
+        p_amount: amt,
       })
 
       if (payoutErr) throw payoutErr
+      const res = data as { success: boolean; payout_id?: string; new_balance?: number; message?: string }
+      if (!res?.success) {
+        throw new Error(res?.message || 'Failed to submit withdrawal request.')
+      }
 
-      const newBal = Math.max(0, wallet.balance - amt)
-      const newWithdrawn = (wallet.total_withdrawn || 0) + amt
-
-      const { error: wErr } = await supabase
-        .from('wallets')
-        .update({
-          balance: newBal,
-          total_withdrawn: newWithdrawn,
-          updated_at: nowIso,
-        })
-        .eq('user_id', currentUser.id)
-
-      if (wErr) throw wErr
-
-      setWallet((prev) => (prev ? { ...prev, balance: newBal, total_withdrawn: newWithdrawn } : null))
       setPayoutSuccessMsg(`Withdrawal request for ₦${amt.toLocaleString()} submitted successfully. Our team will process it to your bank account.`)
       fetchWalletAndMonetization(currentUser.id)
       setTimeout(() => {
@@ -2176,7 +2240,7 @@ export const Dashboard: React.FC = () => {
                 Monetization & Payout Center
               </h2>
               <p className="text-xs sm:text-sm text-gray-500 mt-1">
-                Earn ₦200 cash reward for every candidate who upgrades to JAMBStar Pro using your unique referral code.
+                Earn ₦{currentRewardRate} cash reward for every candidate who upgrades to JAMBStar Pro using your unique referral code.
               </p>
             </div>
 
@@ -2184,7 +2248,7 @@ export const Dashboard: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setShowPayoutModal(true)}
-                disabled={(wallet?.balance || 0) < 1000}
+                disabled={(wallet?.balance || 0) < 500}
                 className="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 shrink-0"
               >
                 <span>💳</span>
@@ -2204,7 +2268,7 @@ export const Dashboard: React.FC = () => {
                 Start Earning with the JAMBStar Affiliate Program
               </h3>
               <p className="text-emerald-100 text-xs sm:text-sm max-w-2xl leading-relaxed">
-                As a valued member, you are invited to join our affiliate program. Earn ₦200 for every candidate that joins JAMBStar Pro with your referral link. Payouts are credited directly to your verified Nigerian bank account with a minimum withdrawal threshold of ₦1,000 (5 referrals).
+                As a valued member, you are invited to join our affiliate program. Earn ₦250–₦400 for every candidate that joins JAMBStar Pro with your referral link. Payouts are credited directly to your verified Nigerian bank account with a minimum withdrawal threshold of ₦500 (2 referrals).
               </p>
               <div className="flex flex-wrap items-center gap-3 pt-2">
                 <button
@@ -2239,7 +2303,7 @@ export const Dashboard: React.FC = () => {
                     Affiliate Invitation Declined
                   </h3>
                   <p className="text-xs sm:text-sm text-gray-500 mt-1 leading-relaxed">
-                    You previously opted out of the JAMBStar Affiliate Program. If you have changed your mind and would like to start earning ₦200 per referral, you can request a new invitation.
+                    You previously opted out of the JAMBStar Affiliate Program. If you have changed your mind and would like to start earning ₦250–₦400 per referral, you can request a new invitation.
                   </p>
                 </div>
               </div>
@@ -2268,7 +2332,7 @@ export const Dashboard: React.FC = () => {
                         Pro Affiliate Monetization Program
                       </h3>
                       <p className="text-xs sm:text-sm text-gray-500 mt-1 leading-relaxed">
-                        The JAMBStar Affiliate Program is an exclusive benefit for JAMBStar Pro members. Upgrade your account to unlock lifetime Pro CBT practice, unlimited topic drills, and your personal affiliate referral code to earn ₦200 per referral.
+                        The JAMBStar Affiliate Program is an exclusive benefit for JAMBStar Pro members. Upgrade your account to unlock lifetime Pro CBT practice, unlimited topic drills, and your personal affiliate referral code to earn ₦250–₦400 per referral.
                       </p>
                     </div>
                   </div>
@@ -2319,6 +2383,76 @@ export const Dashboard: React.FC = () => {
               </div>
             ) : (
             <>
+              {/* Celebratory Milestone Unlocked Banner */}
+              {pendingTierOffer && (
+                <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 text-white shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-in fade-in">
+                  <div className="space-y-1">
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-black/20 text-white">
+                      ⭐ Milestone Unlocked
+                    </div>
+                    <h3 className="text-xl sm:text-2xl font-black">
+                      Congratulations! You've unlocked ₦{pendingTierOffer}/referral!
+                    </h3>
+                    <p className="text-xs sm:text-sm text-amber-100">
+                      Your referral milestone qualifies you for higher earnings. Click to activate this rate immediately.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleAcceptTierOffer}
+                    disabled={acceptingOffer}
+                    className="px-6 py-3 rounded-xl font-black text-sm bg-white text-orange-700 hover:bg-amber-50 shadow-md transition-all cursor-pointer shrink-0 disabled:opacity-50"
+                  >
+                    {acceptingOffer ? 'Activating...' : `Accept ₦${pendingTierOffer} Reward Rate →`}
+                  </button>
+                </div>
+              )}
+
+              {/* Milestone Progress Tracker */}
+              <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-bold uppercase tracking-wider text-emerald-800">
+                      Affiliate Tier Status
+                    </div>
+                    <div className="text-lg font-black text-gray-900 flex items-center gap-2 mt-0.5">
+                      <span>Current Reward Rate:</span>
+                      <span className="font-mono text-emerald-600 bg-emerald-50 px-2.5 py-0.5 rounded-lg border border-emerald-200">
+                        ₦{currentRewardRate} / Pro Upgrade
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-xs text-gray-500 font-medium">
+                    {currentRewardRate < 300 ? (
+                      <span>Target: <strong>5 Pro Referrals</strong> for ₦300/ref ({referrals.length}/5 completed)</span>
+                    ) : currentRewardRate < 400 ? (
+                      <span>Target: <strong>10 Pro Referrals</strong> for ₦400/ref ({referrals.length}/10 completed)</span>
+                    ) : (
+                      <span className="text-amber-600 font-bold">🏆 Top Tier Affiliate (₦400/ref)</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Tier visual steps */}
+                <div className="grid grid-cols-3 gap-2 pt-1">
+                  <div className={`p-3 rounded-xl border text-center transition-all ${currentRewardRate >= 250 ? 'border-emerald-300 bg-emerald-50/70 text-emerald-900' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
+                    <div className="text-[10px] font-bold uppercase tracking-wider">Tier 1: Starter</div>
+                    <div className="text-base font-black font-mono mt-0.5">₦250</div>
+                    <div className="text-[11px] text-gray-500">0 - 4 Referrals</div>
+                  </div>
+                  <div className={`p-3 rounded-xl border text-center transition-all ${currentRewardRate >= 300 ? 'border-emerald-300 bg-emerald-50/70 text-emerald-900' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
+                    <div className="text-[10px] font-bold uppercase tracking-wider">Tier 2: Silver</div>
+                    <div className="text-base font-black font-mono mt-0.5">₦300</div>
+                    <div className="text-[11px] text-gray-500">5 - 9 Referrals</div>
+                  </div>
+                  <div className={`p-3 rounded-xl border text-center transition-all ${currentRewardRate >= 400 ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
+                    <div className="text-[10px] font-bold uppercase tracking-wider">Tier 3: Gold Master</div>
+                    <div className="text-base font-black font-mono mt-0.5">₦400</div>
+                    <div className="text-[11px] text-gray-500">10+ Referrals</div>
+                  </div>
+                </div>
+              </div>
+
               {/* 4 Stat Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs space-y-2">
@@ -2330,10 +2464,10 @@ export const Dashboard: React.FC = () => {
                     ₦{(wallet?.balance || 0).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
                   </div>
                   <div className="text-[11px] text-gray-500">
-                    {(wallet?.balance || 0) >= 1000 ? (
+                    {(wallet?.balance || 0) >= 500 ? (
                       <span className="text-emerald-700 font-bold">✓ Ready for withdrawal</span>
                     ) : (
-                      <span>₦{(1000 - (wallet?.balance || 0)).toLocaleString()} to min payout</span>
+                      <span>₦{(500 - (wallet?.balance || 0)).toLocaleString()} to min payout</span>
                     )}
                   </div>
                 </div>
@@ -2388,7 +2522,7 @@ export const Dashboard: React.FC = () => {
                       <span>Your Unique Referral Link</span>
                     </h3>
                     <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                      ₦200 / referral
+                      ₦{currentRewardRate} / referral
                     </span>
                   </div>
 
@@ -2479,7 +2613,7 @@ export const Dashboard: React.FC = () => {
                   )}
 
                   <div className="text-[11px] text-gray-400">
-                    Withdrawal threshold is ₦1,000. Changes to bank details in Settings are protected by a 7-day cooldown.
+                    Withdrawal threshold is ₦500. Changes to bank details in Settings are protected by a 7-day cooldown.
                   </div>
                 </div>
               </div>
@@ -2495,7 +2629,7 @@ export const Dashboard: React.FC = () => {
 
                   {payouts.length === 0 ? (
                     <div className="p-8 text-center text-xs text-gray-400 border border-dashed border-gray-200 rounded-xl">
-                      No withdrawal requests yet. Request your first payout once your balance reaches ₦1,000.
+                      No withdrawal requests yet. Request your first payout once your balance reaches ₦500.
                     </div>
                   ) : (
                     <div className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
@@ -2537,44 +2671,142 @@ export const Dashboard: React.FC = () => {
 
                 {/* Referral History */}
                 <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
-                  <h3 className="text-base font-bold text-gray-900 flex items-center justify-between">
-                    <span>Recent Referrals</span>
-                    <span className="text-xs text-gray-400 font-normal">({referrals.length} completed)</span>
-                  </h3>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                      <span>👥</span>
+                      <span>Recent Referrals</span>
+                    </h3>
+                    <span className="text-xs text-gray-400 font-normal">
+                      ({detailedReferrals.length > 0 ? detailedReferrals.length : referrals.length} tracked)
+                    </span>
+                  </div>
 
-                  {referrals.length === 0 ? (
+                  {(detailedReferrals.length === 0 && referrals.length === 0) ? (
                     <div className="p-8 text-center text-xs text-gray-400 border border-dashed border-gray-200 rounded-xl">
-                      No referrals yet. Share your referral link to earn ₦200 per Pro upgrade!
+                      No referrals yet. Share your referral link to earn ₦{currentRewardRate} per Pro upgrade!
                     </div>
                   ) : (
                     <div className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
-                      {referrals.map((r) => (
-                        <div key={r.id} className="py-3 flex items-center justify-between text-xs">
-                          <div>
-                            <div className="font-bold text-emerald-700 font-mono">
-                              +₦{(r.reward_amount || 200).toLocaleString()}
+                      {(detailedReferrals.length > 0 ? detailedReferrals : referrals).map((r: any) => {
+                        const isCompleted = r.status === 'completed'
+                        return (
+                          <div key={r.id} className="py-3 flex items-center justify-between text-xs">
+                            <div className="space-y-0.5">
+                              <div className="font-bold text-gray-900">
+                                {r.candidate_name || 'Candidate'}
+                              </div>
+                              <div className="text-[11px] text-gray-500">
+                                {isCompleted ? 'Candidate Pro Upgrade' : 'Candidate Free Registration'}
+                              </div>
+                              <div className="text-[10px] text-gray-400 font-mono">
+                                {new Date(r.created_at).toLocaleDateString('en-GB', {
+                                  day: 'numeric',
+                                  month: 'short',
+                                  year: 'numeric',
+                                })}
+                              </div>
                             </div>
-                            <div className="text-[11px] text-gray-500">
-                              Candidate Pro Upgrade
-                            </div>
-                            <div className="text-[10px] text-gray-400 font-mono">
-                              {new Date(r.created_at).toLocaleDateString('en-GB', {
-                                day: 'numeric',
-                                month: 'short',
-                                year: 'numeric',
-                              })}
+                            <div className="text-right space-y-1">
+                              <div className={`font-mono font-bold ${isCompleted ? 'text-emerald-700' : 'text-gray-400'}`}>
+                                {isCompleted ? `+₦${(r.reward_amount || currentRewardRate).toLocaleString()}` : '₦0.00'}
+                              </div>
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                  isCompleted
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-amber-100 text-amber-800'
+                                }`}
+                              >
+                                {isCompleted ? 'Pro Subscribed — Credited' : 'Signed Up (Free) — Awaiting Pro'}
+                              </span>
                             </div>
                           </div>
-                          <div>
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800">
-                              {r.status}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   )}
                 </div>
+              </div>
+
+              {/* Wallet Financial Ledger Table */}
+              <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                      <span>📜</span>
+                      <span>Wallet Financial Ledger</span>
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Immutable audit record of all commission credits, withdrawal debits, and balance adjustments.
+                    </p>
+                  </div>
+                  <span className="text-xs text-gray-400 font-mono">
+                    ({walletTransactions.length} records)
+                  </span>
+                </div>
+
+                {walletTransactions.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-gray-400 border border-dashed border-gray-200 rounded-xl">
+                    No wallet ledger records yet. Transactions will appear here as commissions are credited or withdrawals processed.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-gray-50 text-gray-500 uppercase text-[10px] font-bold tracking-wider border-b border-gray-200">
+                        <tr>
+                          <th className="py-2.5 px-3">Date</th>
+                          <th className="py-2.5 px-3">Transaction Type</th>
+                          <th className="py-2.5 px-3">Description / Reference</th>
+                          <th className="py-2.5 px-3 text-right">Amount</th>
+                          <th className="py-2.5 px-3 text-right">Balance After</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {walletTransactions.map((tx) => {
+                          const isCredit = tx.type === 'commission_credit' || tx.type === 'withdrawal_refund'
+                          return (
+                            <tr key={tx.id} className="hover:bg-gray-50/60 transition-colors">
+                              <td className="py-3 px-3 font-mono text-[11px] text-gray-500 whitespace-nowrap">
+                                {new Date(tx.created_at).toLocaleDateString('en-GB', {
+                                  day: 'numeric',
+                                  month: 'short',
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </td>
+                              <td className="py-3 px-3">
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                    tx.type === 'commission_credit'
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : tx.type === 'withdrawal_debit'
+                                      ? 'bg-rose-100 text-rose-800'
+                                      : 'bg-blue-100 text-blue-800'
+                                  }`}
+                                >
+                                  {tx.type.replace('_', ' ')}
+                                </span>
+                              </td>
+                              <td className="py-3 px-3 max-w-xs truncate text-gray-700">
+                                <div>{tx.description}</div>
+                                {tx.reference && (
+                                  <div className="text-[10px] text-gray-400 font-mono truncate">{tx.reference}</div>
+                                )}
+                              </td>
+                              <td className={`py-3 px-3 text-right font-mono font-bold whitespace-nowrap ${isCredit ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                {isCredit ? '+' : '-'}₦{Number(tx.amount).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+                              </td>
+                              <td className="py-3 px-3 text-right font-mono text-gray-900 whitespace-nowrap">
+                                ₦{Number(tx.balance_after).toLocaleString('en-NG', { minimumFractionDigits: 2 })}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </>
           ))}
@@ -2751,11 +2983,11 @@ export const Dashboard: React.FC = () => {
                 <div className="p-4 rounded-2xl bg-emerald-50/70 border border-emerald-200 text-left space-y-2.5 text-xs text-gray-700">
                   <div className="flex items-center gap-2">
                     <span className="text-emerald-700 font-bold">✓</span>
-                    <span><strong>Earn ₦200 per Pro referral:</strong> Instant automated wallet credits for every upgrade.</span>
+                    <span><strong>Earn ₦250–₦400 per Pro referral:</strong> Instant automated tiered wallet credits for every upgrade.</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-emerald-700 font-bold">✓</span>
-                    <span><strong>₦1,000 Minimum Payout:</strong> Request direct withdrawal to your bank account after just 5 referrals.</span>
+                    <span><strong>₦500 Minimum Payout:</strong> Request direct withdrawal to your bank account after just 2 referrals.</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-emerald-700 font-bold">✓</span>
@@ -2929,7 +3161,7 @@ export const Dashboard: React.FC = () => {
                     You're Officially an Affiliate!
                   </h3>
                   <p className="text-xs sm:text-sm text-gray-600 mt-1">
-                    Your unique referral link is ready. Start sharing to earn ₦200 per Pro upgrade.
+                    Your unique referral link is ready. Start sharing to earn ₦{currentRewardRate} per Pro upgrade.
                   </p>
                 </div>
 
@@ -3010,15 +3242,15 @@ export const Dashboard: React.FC = () => {
                 </label>
                 <input
                   type="number"
-                  min={1000}
-                  max={wallet?.balance || 1000}
+                  min={500}
+                  max={wallet?.balance || 500}
                   step={100}
                   value={payoutAmount}
                   onChange={(e) => setPayoutAmount(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 font-mono text-base font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
                 <span className="text-[11px] text-gray-400 mt-1 block">
-                  Minimum withdrawal is ₦1,000.
+                  Minimum withdrawal is ₦500.
                 </span>
               </div>
 
@@ -3051,7 +3283,7 @@ export const Dashboard: React.FC = () => {
               <button
                 type="button"
                 onClick={handleSubmitPayout}
-                disabled={requestingPayout || !bankName || !accountNumber || (wallet?.balance || 0) < 1000}
+                disabled={requestingPayout || !bankName || !accountNumber || (wallet?.balance || 0) < 500}
                 className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
               >
                 {requestingPayout ? (

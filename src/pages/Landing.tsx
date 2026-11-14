@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { AdBanner } from "../components/AdBanner";
@@ -32,6 +32,71 @@ export const Landing: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+
+  // Compulsory Two-Option Referral Selector State
+  const [referralMode, setReferralMode] = useState<"code" | "none" | null>(null);
+  const [referralCodeInput, setReferralCodeInput] = useState<string>("");
+  const [referralFromUrl, setReferralFromUrl] = useState<boolean>(false);
+  const [referralValidation, setReferralValidation] = useState<{
+    isValidating: boolean;
+    isValid: boolean | null;
+    referrerName: string | null;
+    error: string | null;
+  }>({
+    isValidating: false,
+    isValid: null,
+    referrerName: null,
+    error: null,
+  });
+
+  const validateCode = useCallback(async (codeToValidate: string) => {
+    const clean = codeToValidate.trim().toUpperCase();
+    if (!clean) {
+      setReferralValidation({
+        isValidating: false,
+        isValid: false,
+        referrerName: null,
+        error: "Please enter your referral code.",
+      });
+      return false;
+    }
+
+    setReferralValidation((prev) => ({ ...prev, isValidating: true, error: null }));
+    try {
+      const { data, error } = await supabase.rpc("validate_referral_code" as any, {
+        p_code: clean,
+      });
+
+      if (error) throw error;
+
+      const res = data as { valid: boolean; referrer_name: string | null } | null;
+      if (res && res.valid) {
+        setReferralValidation({
+          isValidating: false,
+          isValid: true,
+          referrerName: res.referrer_name || "Affiliate",
+          error: null,
+        });
+        return true;
+      } else {
+        setReferralValidation({
+          isValidating: false,
+          isValid: false,
+          referrerName: null,
+          error: "Invalid referral code. Please check the code or select 'No referral'.",
+        });
+        return false;
+      }
+    } catch {
+      setReferralValidation({
+        isValidating: false,
+        isValid: false,
+        referrerName: null,
+        error: "Unable to verify referral code. Please check your connection.",
+      });
+      return false;
+    }
+  }, []);
 
   // Real-time password criteria for registration
   const passwordCriteria = [
@@ -75,6 +140,36 @@ export const Landing: React.FC = () => {
       setErrorMessage(null);
     }
   }, [searchParams]);
+
+  // Inspect URL referral parameter (?ref=... or ?referral=...) and persistent localStorage
+  useEffect(() => {
+    const rawRef = searchParams.get("ref") || searchParams.get("referral");
+    if (rawRef && rawRef.trim()) {
+      const cleanRef = rawRef.trim().toUpperCase();
+      try {
+        localStorage.setItem("jambstar_referral_code", cleanRef);
+      } catch (e) {
+        console.warn("localStorage write error:", e);
+      }
+      setReferralMode("code");
+      setReferralCodeInput(cleanRef);
+      setReferralFromUrl(true);
+      setMode("signup");
+      validateCode(cleanRef);
+    } else {
+      try {
+        const stored = localStorage.getItem("jambstar_referral_code");
+        if (stored && stored.trim()) {
+          const cleanRef = stored.trim().toUpperCase();
+          setReferralMode("code");
+          setReferralCodeInput(cleanRef);
+          validateCode(cleanRef);
+        }
+      } catch (e) {
+        console.warn("localStorage read error:", e);
+      }
+    }
+  }, [searchParams, validateCode]);
 
   // Check active Supabase session
   useEffect(() => {
@@ -194,6 +289,20 @@ export const Landing: React.FC = () => {
       return;
     }
 
+    if (mode === "signup") {
+      if (referralMode === null) {
+        setErrorMessage("Please select whether you have a referral code or choose 'No referral'.");
+        return;
+      }
+      if (referralMode === "code") {
+        const isValid = await validateCode(referralCodeInput);
+        if (!isValid) {
+          setErrorMessage("Invalid referral code. Please check the code or select 'No referral'.");
+          return;
+        }
+      }
+    }
+
     if (mode === "signin" && password.length < 6) {
       setErrorMessage("Password must be at least 6 characters long.");
       return;
@@ -234,6 +343,10 @@ export const Landing: React.FC = () => {
               full_name: fullName.trim() || "Student Candidate",
               track,
               gender,
+              referral_code:
+                referralMode === "code" && referralCodeInput.trim()
+                  ? referralCodeInput.trim().toUpperCase()
+                  : null,
             },
           },
         });
@@ -242,6 +355,10 @@ export const Landing: React.FC = () => {
           setErrorMessage(error.message);
           return;
         }
+
+        try {
+          localStorage.removeItem("jambstar_referral_code");
+        } catch {}
 
         if (data.session) {
           // Automatic login upon registration
@@ -320,22 +437,28 @@ export const Landing: React.FC = () => {
             </div>
           </div>
 
-          {/* Prominent 10-Question Demo Action */}
-          <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
+          {/* Prominent 10-Question Demo Action & Pricing */}
+          <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
             <button
               type="button"
               onClick={() => navigate("/quiz?demo=true")}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-xl text-sm sm:text-base font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-md hover:shadow-lg transition-all duration-150 cursor-pointer group"
+              className="inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-xl text-sm sm:text-base font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-md hover:shadow-lg transition-all duration-150 cursor-pointer group"
             >
               <span>⚡ Try 10-Question Demo</span>
               <span className="group-hover:translate-x-1 transition-transform">
                 →
               </span>
             </button>
-            <span className="text-xs text-gray-500 font-medium text-center sm:text-left">
-              Free instant preview • No account required
-            </span>
+            <Link
+              to="/pricing"
+              className="inline-flex items-center justify-center gap-2 px-5 py-3.5 rounded-xl text-sm sm:text-base font-bold text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 shadow-2xs hover:border-emerald-500 hover:text-emerald-700 transition-all cursor-pointer"
+            >
+              <span>💎 View Plans & Pricing (₦1,000)</span>
+            </Link>
           </div>
+          <p className="text-xs text-gray-500 font-medium text-center lg:text-left">
+            Free instant preview • No account required
+          </p>
         </div>
 
         {/* Right Column: Conditionally render Welcome Back component OR Login/Signup Form */}
@@ -532,6 +655,154 @@ export const Landing: React.FC = () => {
                         <option value="male">Male</option>
                         <option value="female">Female</option>
                       </select>
+                    </div>
+
+                    {/* Compulsory Two-Option Referral Selector */}
+                    <div className="pt-1">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                          Referral Invitation *
+                        </label>
+                        {referralFromUrl && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                            ✓ Applied from link
+                          </span>
+                        )}
+                      </div>
+
+                      {/* 2-Option Card Grid */}
+                      <div className="grid grid-cols-2 gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setReferralMode("code");
+                            if (referralCodeInput.trim()) {
+                              validateCode(referralCodeInput);
+                            }
+                          }}
+                          className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+                            referralMode === "code"
+                              ? "border-emerald-600 bg-emerald-50/70 text-emerald-950 ring-2 ring-emerald-500/20"
+                              : "border-gray-200 bg-white hover:border-gray-300 text-gray-700"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-base">🎟️</span>
+                            <span
+                              className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                                referralMode === "code"
+                                  ? "border-emerald-600 bg-emerald-600"
+                                  : "border-gray-300"
+                              }`}
+                            >
+                              {referralMode === "code" && (
+                                <span className="w-1.5 h-1.5 rounded-full bg-white" />
+                              )}
+                            </span>
+                          </div>
+                          <span className="text-xs font-bold mt-2">I have a referral code</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setReferralMode("none");
+                            setReferralCodeInput("");
+                            setReferralFromUrl(false);
+                            setReferralValidation({
+                              isValidating: false,
+                              isValid: null,
+                              referrerName: null,
+                              error: null,
+                            });
+                          }}
+                          className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+                            referralMode === "none"
+                              ? "border-slate-800 bg-slate-50 text-slate-900 ring-2 ring-slate-800/10"
+                              : "border-gray-200 bg-white hover:border-gray-300 text-gray-700"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-base">🚀</span>
+                            <span
+                              className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                                referralMode === "none"
+                                  ? "border-slate-800 bg-slate-800"
+                                  : "border-gray-300"
+                              }`}
+                            >
+                              {referralMode === "none" && (
+                                <span className="w-1.5 h-1.5 rounded-full bg-white" />
+                              )}
+                            </span>
+                          </div>
+                          <span className="text-xs font-bold mt-2">No referral</span>
+                        </button>
+                      </div>
+
+                      {/* Code Input Field when Option A is selected */}
+                      {referralMode === "code" && (
+                        <div className="mt-2.5 space-y-1.5 animate-in fade-in duration-150">
+                          <div className="relative">
+                            <input
+                              type="text"
+                              value={referralCodeInput}
+                              onChange={(e) => {
+                                const val = e.target.value.toUpperCase();
+                                setReferralCodeInput(val);
+                                if (val.trim()) {
+                                  validateCode(val);
+                                } else {
+                                  setReferralValidation({
+                                    isValidating: false,
+                                    isValid: null,
+                                    referrerName: null,
+                                    error: null,
+                                  });
+                                }
+                              }}
+                              onBlur={() => {
+                                if (referralCodeInput.trim()) {
+                                  validateCode(referralCodeInput);
+                                }
+                              }}
+                              placeholder="e.g. JAMB-STAR-ABCD"
+                              className={`w-full px-3.5 py-2.5 rounded-lg border text-sm font-mono focus:outline-none transition-colors ${
+                                referralValidation.isValid === true
+                                  ? "border-emerald-500 bg-emerald-50/30 text-emerald-950 focus:ring-2 focus:ring-emerald-500"
+                                  : referralValidation.isValid === false
+                                  ? "border-rose-400 bg-rose-50/30 text-rose-950 focus:ring-2 focus:ring-rose-400"
+                                  : "border-gray-300 focus:ring-2 focus:ring-emerald-500"
+                              }`}
+                            />
+                            {referralValidation.isValidating && (
+                              <div className="absolute right-3 top-2.5 text-xs text-gray-400 flex items-center gap-1.5">
+                                <div className="w-3.5 h-3.5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+                                <span>Checking...</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Live validation feedback */}
+                          {referralValidation.isValid === true && (
+                            <div className="text-xs font-semibold text-emerald-700 flex items-center gap-1.5">
+                              <span>✓</span>
+                              <span>
+                                Referral code verified (Referred by {referralValidation.referrerName})
+                              </span>
+                            </div>
+                          )}
+                          {referralValidation.isValid === false && (
+                            <div className="text-xs font-semibold text-rose-600 flex items-center gap-1.5">
+                              <span>⚠️</span>
+                              <span>
+                                {referralValidation.error ||
+                                  "Invalid referral code. Please check the code or select 'No referral'."}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </>
                 )}
@@ -825,6 +1096,9 @@ export const Landing: React.FC = () => {
           <span>Independent UTME Simulation</span>
         </div>
         <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6 font-medium text-gray-600">
+          <Link to="/pricing" className="hover:text-emerald-600 transition-colors">
+            Pricing
+          </Link>
           <Link to="/privacy" className="hover:text-emerald-600 transition-colors">
             Privacy Policy
           </Link>
