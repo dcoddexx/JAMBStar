@@ -32,7 +32,7 @@ serve(async (req) => {
       )
     }
 
-    const paystackSecretKey = Deno.env.get('PAYSTACK_SECRET_KEY') || ''
+    const paystackSecretKey = Deno.env.get('PAYSTACK_SECRET_KEY')?.trim() || ''
     if (!paystackSecretKey) {
       console.error('[resolve-bank-account] Missing PAYSTACK_SECRET_KEY in environment')
       return new Response(
