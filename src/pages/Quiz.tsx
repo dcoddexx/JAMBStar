@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { AdBanner } from '../components/AdBanner'
 import {
   type Question,
   type Subject,
@@ -1181,10 +1180,7 @@ export const Quiz: React.FC = () => {
             </div>
           </div>
 
-          {/* AdSense Sidebar Ad Banner */}
-          <div className="bg-white rounded-xl border border-gray-200 p-2 shadow-xs">
-            <AdBanner slot="1001001003" format="rectangle" label="Sponsored" />
-          </div>
+
 
           {/* JAMB 8-Key CBT Reference */}
           <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 text-xs text-slate-700">

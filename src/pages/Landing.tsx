@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { AdBanner } from "../components/AdBanner";
 import { AnimatedExamTip } from "../components/AnimatedExamTip";
 
 type AuthMode = "signin" | "signup" | "forgot_password";
@@ -1041,10 +1040,7 @@ export const Landing: React.FC = () => {
         </div>
       </div>
 
-      {/* AdSense Monetization Banner */}
-      <div className="mt-10 sm:mt-14 w-full max-w-4xl mx-auto">
-        <AdBanner slot="1001001001" format="horizontal" />
-      </div>
+
 
       {/* Feature Highlights Grid */}
       <div className="mt-16 sm:mt-24 grid grid-cols-1 md:grid-cols-3 gap-6 w-full text-left">
@@ -1096,17 +1092,23 @@ export const Landing: React.FC = () => {
           <span>Independent UTME Simulation</span>
         </div>
         <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6 font-medium text-gray-600">
+          <Link to="/study-guides" className="hover:text-emerald-600 transition-colors">
+            Study Guides
+          </Link>
           <Link to="/pricing" className="hover:text-emerald-600 transition-colors">
             Pricing
+          </Link>
+          <Link to="/about" className="hover:text-emerald-600 transition-colors">
+            About Us
+          </Link>
+          <Link to="/contact" className="hover:text-emerald-600 transition-colors">
+            Contact
           </Link>
           <Link to="/privacy" className="hover:text-emerald-600 transition-colors">
             Privacy Policy
           </Link>
           <Link to="/terms" className="hover:text-emerald-600 transition-colors">
             Terms of Service
-          </Link>
-          <Link to="/contact" className="hover:text-emerald-600 transition-colors">
-            Contact & About Us
           </Link>
         </div>
       </div>

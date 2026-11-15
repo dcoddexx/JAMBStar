@@ -17,6 +17,9 @@ import Contact from "./pages/Contact";
 import Pricing from "./pages/Pricing";
 import Settings from "./pages/Settings";
 import ResetPassword from "./pages/ResetPassword";
+import StudyGuides from "./pages/StudyGuides";
+import StudyGuideDetail from "./pages/StudyGuideDetail";
+import About from "./pages/About";
 import Navbar, { normalizeRole, isUserAdmin } from "./components/Navbar";
 import { MaintenanceScreen } from "./components/MaintenanceScreen";
 import { fetchSystemSettings, type SystemSettings } from "./services/systemSettings";
@@ -343,7 +346,12 @@ const App: React.FC = () => {
             {/* Pricing & Subscription Page */}
             <Route path="/pricing" element={<Pricing />} />
 
+            {/* High-Yield Study Guides & Revision Articles */}
+            <Route path="/study-guides" element={<StudyGuides />} />
+            <Route path="/study-guides/:slug" element={<StudyGuideDetail />} />
+
             {/* Google AdSense Compliance & Legal Pages */}
+            <Route path="/about" element={<About />} />
             <Route path="/privacy" element={<PrivacyPolicy />} />
             <Route path="/terms" element={<TermsOfService />} />
             <Route path="/contact" element={<Contact />} />
@@ -362,17 +370,26 @@ const App: React.FC = () => {
               <span>JAMB UTME CBT Preparation System</span>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6 font-medium text-slate-600">
+              <Link to="/" className="hover:text-emerald-600 transition-colors">
+                Home
+              </Link>
+              <Link to="/study-guides" className="hover:text-emerald-600 transition-colors">
+                Study Guides
+              </Link>
               <Link to="/pricing" className="hover:text-emerald-600 transition-colors">
                 Pricing
+              </Link>
+              <Link to="/about" className="hover:text-emerald-600 transition-colors">
+                About Us
+              </Link>
+              <Link to="/contact" className="hover:text-emerald-600 transition-colors">
+                Contact
               </Link>
               <Link to="/privacy" className="hover:text-emerald-600 transition-colors">
                 Privacy Policy
               </Link>
               <Link to="/terms" className="hover:text-emerald-600 transition-colors">
                 Terms of Service
-              </Link>
-              <Link to="/contact" className="hover:text-emerald-600 transition-colors">
-                Contact & About Us
               </Link>
             </div>
             <p className="text-center md:text-right text-xs text-slate-400">

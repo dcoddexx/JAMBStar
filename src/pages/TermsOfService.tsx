@@ -142,10 +142,54 @@ export const TermsOfService: React.FC = () => {
           </p>
         </section>
 
-        {/* Section 8: Governing Law */}
+        {/* Section 8: Pro Lifetime Access & Payments */}
+        <section className="bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-3">
+          <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+            <span>8.</span>
+            <span>JAMBStar Pro Lifetime Membership & Payment Terms</span>
+          </h2>
+          <p>
+            Candidates may upgrade to <strong>JAMBStar Pro</strong> for a single, one-time payment of <strong>₦1,000 (One Thousand Naira)</strong>.
+          </p>
+          <ul className="list-disc pl-5 space-y-2 text-gray-700">
+            <li>
+              <strong>No Recurring Subscriptions:</strong> JAMBStar Pro is not a recurring monthly or annual subscription. Payment gives the candidate unrestricted, lifetime access to all question banks, full CBT mock simulations, and in-depth explanations for their registered account.
+            </li>
+            <li>
+              <strong>Payment Processing via Paystack:</strong> All payments are securely processed through Paystack, a Central Bank of Nigeria (CBN)-licensed payment processor. JAMBStar does not store card numbers, CVV codes, or bank account PINs on our servers.
+            </li>
+            <li>
+              <strong>Refund Policy:</strong> Because Pro access grants immediate and irrevocable access to our digital question banks and analytical software, fees are non-refundable once activated, except where a duplicate charge has occurred due to technical errors verified by Paystack transaction reference.
+            </li>
+          </ul>
+        </section>
+
+        {/* Section 9: Affiliate & Referral Program Terms */}
+        <section className="bg-white p-6 rounded-2xl border border-gray-200 shadow-2xs space-y-3">
+          <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+            <span>9.</span>
+            <span>Affiliate & Referral Monetization Terms</span>
+          </h2>
+          <p>
+            JAMBStar operates a tiered referral program allowing enrolled Pro candidates and educational ambassadors to earn commissions by recommending JAMBStar to new UTME candidates.
+          </p>
+          <ul className="list-disc pl-5 space-y-2 text-gray-700">
+            <li>
+              <strong>Commission Structure:</strong> Referrers earn tiered rewards: <strong>₦250</strong> per verified Pro upgrade for Tier 1 (1–19 referrals), <strong>₦300</strong> for Tier 2 (20–49 referrals), and <strong>₦400</strong> for Tier 3 (50+ referrals). Commissions are credited only when a referred candidate successfully completes the ₦1,000 Pro upgrade verified by an atomic Paystack transaction ledger entry.
+            </li>
+            <li>
+              <strong>Payout Minimum & Verification:</strong> Referral earnings can be withdrawn once an available balance reaches a minimum of <strong>₦500.00</strong>. Payouts are made exclusively to verified Nigerian commercial bank accounts matching the candidate's verified name via Paystack's bank resolution API.
+            </li>
+            <li>
+              <strong>Anti-Fraud & Self-Referral Prohibition:</strong> Self-referrals (creating alternate accounts to claim commissions), spamming, automated referral bots, or falsifying bank resolution data are strictly prohibited. Any detected abuse results in immediate forfeiture of accrued balances and termination of the offending account.
+            </li>
+          </ul>
+        </section>
+
+        {/* Section 10: Governing Law */}
         <section className="bg-slate-900 text-white p-6 sm:p-8 rounded-2xl space-y-3">
           <h2 className="text-lg font-bold text-white flex items-center gap-2">
-            <span>8.</span>
+            <span>10.</span>
             <span>Governing Law & Contact</span>
           </h2>
           <p className="text-slate-300 text-xs sm:text-sm">

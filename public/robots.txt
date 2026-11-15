@@ -1,4 +1,9 @@
 User-agent: *
 Allow: /
+Disallow: /dashboard
+Disallow: /admin
+Disallow: /admin-portal
+Disallow: /settings
+Disallow: /quiz
 
 Sitemap: https://jambstar.tech/sitemap.xml

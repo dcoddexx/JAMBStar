@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { AdBanner } from '../components/AdBanner'
 import { UpgradeModal } from '../components/UpgradeModal'
 import { CBTSetupModal } from '../components/CBTSetupModal'
 import {
@@ -3300,10 +3299,6 @@ export const Dashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Monetization AdBanner */}
-      <div className="pt-2">
-        <AdBanner slot="1001001002" format="horizontal" />
-      </div>
     </div>
   )
 }
