@@ -48,6 +48,12 @@ export const Landing: React.FC = () => {
     error: null,
   });
 
+  // MFA (2FA) Challenge State
+  const [mfaChallengeMode, setMfaChallengeMode] = useState<boolean>(false);
+  const [mfaFactorId, setMfaFactorId] = useState<string>("");
+  const [mfaCode, setMfaCode] = useState<string>("");
+  const [verifyingMfa, setVerifyingMfa] = useState<boolean>(false);
+
   const validateCode = useCallback(async (codeToValidate: string) => {
     const clean = codeToValidate.trim().toUpperCase();
     if (!clean) {
@@ -262,6 +268,11 @@ export const Landing: React.FC = () => {
           redirectTo: `${window.location.origin}/reset-password`,
         });
         if (error) throw error;
+        await supabase.rpc("log_auth_event" as any, {
+          p_event_type: "PASSWORD_RESET_REQUESTED",
+          p_email: email.trim(),
+          p_user_agent: navigator.userAgent,
+        });
         setSuccessMessage(
           "Password reset link sent! Check your email inbox to update your password.",
         );
@@ -317,6 +328,13 @@ export const Landing: React.FC = () => {
         });
 
         if (error) {
+          // Log failed login event for telemetry and suspicious burst detection
+          await supabase.rpc("log_auth_event" as any, {
+            p_event_type: "LOGIN_FAILED",
+            p_email: email.trim(),
+            p_user_agent: navigator.userAgent,
+          });
+
           if (
             error.message.toLowerCase().includes("invalid login credentials")
           ) {
@@ -330,6 +348,30 @@ export const Landing: React.FC = () => {
         }
 
         if (data.user) {
+          // Check if candidate or administrator has enrolled TOTP Multi-Factor Authentication
+          try {
+            const { data: aalData } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+            if (aalData && aalData.nextLevel === "aal2" && aalData.currentLevel !== "aal2") {
+              const { data: factors } = await supabase.auth.mfa.listFactors();
+              const totp = factors?.totp?.[0];
+              if (totp) {
+                setMfaFactorId(totp.id);
+                setMfaChallengeMode(true);
+                setLoading(false);
+                return;
+              }
+            }
+          } catch (mfaCheckErr) {
+            console.warn("MFA level inspection note:", mfaCheckErr);
+          }
+
+          // Telemetry for successful authentication
+          await supabase.rpc("log_auth_event" as any, {
+            p_event_type: "LOGIN_SUCCESS",
+            p_email: email.trim(),
+            p_user_agent: navigator.userAgent,
+          });
+
           navigate("/dashboard");
         }
       } else {
@@ -377,6 +419,57 @@ export const Landing: React.FC = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleVerifyMfa = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    const cleanCode = mfaCode.trim().replace(/\D/g, "");
+    if (!cleanCode || cleanCode.length !== 6) {
+      setErrorMessage("Please enter the 6-digit code from your authenticator app.");
+      return;
+    }
+
+    setVerifyingMfa(true);
+    try {
+      const { data: challenge, error: challengeErr } = await supabase.auth.mfa.challenge({
+        factorId: mfaFactorId,
+      });
+      if (challengeErr) throw challengeErr;
+
+      const { error: verifyErr } = await supabase.auth.mfa.verify({
+        factorId: mfaFactorId,
+        challengeId: challenge.id,
+        code: cleanCode,
+      });
+      if (verifyErr) throw verifyErr;
+
+      await supabase.rpc("log_auth_event" as any, {
+        p_event_type: "MFA_VERIFIED",
+        p_email: email.trim(),
+        p_user_agent: navigator.userAgent,
+      });
+
+      navigate("/dashboard");
+    } catch (err: unknown) {
+      const e = err as Error;
+      await supabase.rpc("log_auth_event" as any, {
+        p_event_type: "MFA_CHALLENGE_FAILED",
+        p_email: email.trim(),
+        p_user_agent: navigator.userAgent,
+      });
+      setErrorMessage(e.message || "Invalid authenticator code. Please check your app and try again.");
+    } finally {
+      setVerifyingMfa(false);
+    }
+  };
+
+  const handleCancelMfa = async () => {
+    await supabase.auth.signOut();
+    setMfaChallengeMode(false);
+    setMfaCode("");
+    setMfaFactorId("");
+    setErrorMessage(null);
   };
 
   return (
@@ -496,8 +589,80 @@ export const Landing: React.FC = () => {
                 </div>
               )}
 
-              {/* Mode Switcher Tabs */}
-              {mode === "forgot_password" ? (
+              {/* If Two-Factor Challenge is Active */}
+              {mfaChallengeMode ? (
+                <div className="space-y-5 animate-in fade-in duration-200">
+                  <div className="text-center space-y-2 pb-2 border-b border-gray-100">
+                    <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center text-2xl mx-auto shadow-2xs">
+                      🔐
+                    </div>
+                    <h2 className="text-xl font-extrabold text-gray-900 tracking-tight">
+                      Two-Factor Authentication
+                    </h2>
+                    <p className="text-xs text-gray-600 max-w-xs mx-auto">
+                      Enter the 6-digit verification code from your authenticator app (e.g., Google Authenticator, Authy) to complete your sign-in.
+                    </p>
+                  </div>
+
+                  {/* Error Message Box */}
+                  {errorMessage && (
+                    <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs sm:text-sm flex items-start gap-2.5">
+                      <span className="text-red-500 text-base leading-none">⚠️</span>
+                      <div className="flex-1 font-medium">{errorMessage}</div>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleVerifyMfa} className="space-y-4">
+                    <div>
+                      <label
+                        htmlFor="mfa-auth-code"
+                        className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2 text-center"
+                      >
+                        6-Digit Security Code
+                      </label>
+                      <input
+                        id="mfa-auth-code"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        maxLength={6}
+                        required
+                        autoFocus
+                        value={mfaCode}
+                        onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
+                        placeholder="••••••"
+                        className="w-full text-center tracking-[0.6em] font-mono text-2xl font-black py-3 px-4 rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition-all placeholder:tracking-normal placeholder:font-normal placeholder:text-gray-300"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={verifyingMfa || mfaCode.trim().length !== 6}
+                      className="w-full py-3 px-4 rounded-xl font-bold text-sm text-white bg-emerald-600 hover:bg-emerald-700 shadow-md hover:shadow-lg transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {verifyingMfa ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          <span>Verifying Security Code...</span>
+                        </>
+                      ) : (
+                        <span>Verify & Sign In</span>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleCancelMfa}
+                      className="w-full py-2 text-xs font-semibold text-gray-500 hover:text-gray-800 transition-colors cursor-pointer text-center block"
+                    >
+                      Cancel and return to sign in
+                    </button>
+                  </form>
+                </div>
+              ) : (
+                <>
+                  {/* Mode Switcher Tabs */}
+                  {mode === "forgot_password" ? (
                 <div className="flex items-center justify-between pb-3 mb-5 border-b border-gray-100">
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
@@ -1035,6 +1200,8 @@ export const Landing: React.FC = () => {
                   </>
                 )}
               </div>
+            </>
+          )}
             </div>
           )}
         </div>

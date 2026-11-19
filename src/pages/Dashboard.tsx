@@ -3269,6 +3269,14 @@ export const Dashboard: React.FC = () => {
                   </div>
                 )}
               </div>
+
+              {/* 48-Hour Bank Security Hold Advisory */}
+              <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 text-[11px] text-blue-900 flex items-start gap-2">
+                <span className="text-sm shrink-0">🛡️</span>
+                <span>
+                  <strong>Security Hold:</strong> If your bank details were updated within the last 48 hours, withdrawals are paused for account takeover protection.
+                </span>
+              </div>
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">

@@ -43,6 +43,19 @@ export const Settings: React.FC = () => {
   const [savingBank, setSavingBank] = useState<boolean>(false)
   const [copiedCode, setCopiedCode] = useState<boolean>(false)
 
+  // 2FA Multi-Factor Authentication State
+  const [mfaFactors, setMfaFactors] = useState<any[]>([])
+  const [enrollingMfa, setEnrollingMfa] = useState<boolean>(false)
+  const [enrollData, setEnrollData] = useState<{ id: string; qr_code: string; secret: string } | null>(null)
+  const [verifyMfaCode, setVerifyMfaCode] = useState<string>('')
+  const [mfaActionLoading, setMfaActionLoading] = useState<boolean>(false)
+  const [mfaMsg, setMfaMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [copiedSecret, setCopiedSecret] = useState<boolean>(false)
+
+  // Recent Authentication Activity Logs State
+  const [userAuthLogs, setUserAuthLogs] = useState<any[]>([])
+  const [loadingAuthLogs, setLoadingAuthLogs] = useState<boolean>(false)
+
   // Compute 7-day bank edit cooldown
   const bankCooldown = checkBankDetailsCooldown(bankDetailsUpdatedAt)
 
@@ -85,6 +98,10 @@ export const Settings: React.FC = () => {
           if (profile.account_name) setAccountName(profile.account_name)
           if (profile.bank_details_updated_at) setBankDetailsUpdatedAt(profile.bank_details_updated_at)
         }
+
+        // Load 2FA MFA status and recent login history
+        loadMfaFactors()
+        loadAuthLogs(user.id)
       } catch (err: unknown) {
         const e = err as Error
         console.error('Failed to load profile:', e)
@@ -355,6 +372,141 @@ export const Settings: React.FC = () => {
     navigator.clipboard.writeText(referralCode)
     setCopiedCode(true)
     setTimeout(() => setCopiedCode(false), 2500)
+  }
+
+  const loadMfaFactors = async () => {
+    try {
+      const { data, error } = await supabase.auth.mfa.listFactors()
+      if (!error && data?.totp) {
+        setMfaFactors(data.totp.filter(f => f.status === 'verified'))
+      }
+    } catch (err) {
+      console.warn('MFA factors loading error:', err)
+    }
+  }
+
+  const loadAuthLogs = async (uid: string) => {
+    setLoadingAuthLogs(true)
+    try {
+      const { data, error } = await supabase
+        .from('auth_audit_logs')
+        .select('*')
+        .eq('user_id', uid)
+        .order('created_at', { ascending: false })
+        .limit(5)
+
+      if (!error && data) {
+        setUserAuthLogs(data)
+      }
+    } catch (err) {
+      console.warn('Auth logs loading error:', err)
+    } finally {
+      setLoadingAuthLogs(false)
+    }
+  }
+
+  const handleStartMfaEnroll = async () => {
+    setMfaMsg(null)
+    setMfaActionLoading(true)
+    try {
+      const { data, error } = await supabase.auth.mfa.enroll({
+        factorType: 'totp',
+        issuer: 'JAMBStar',
+        friendlyName: 'JAMBStar Authenticator',
+      })
+
+      if (error) throw error
+
+      if (data?.totp) {
+        setEnrollData({
+          id: data.id,
+          qr_code: data.totp.qr_code,
+          secret: data.totp.secret,
+        })
+        setEnrollingMfa(true)
+      }
+    } catch (err: unknown) {
+      const e = err as Error
+      setMfaMsg({ type: 'error', text: e.message || 'Failed to initialize 2FA enrollment.' })
+    } finally {
+      setMfaActionLoading(false)
+    }
+  }
+
+  const handleConfirmMfaEnroll = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!enrollData || !verifyMfaCode.trim()) return
+
+    setMfaMsg(null)
+    setMfaActionLoading(true)
+    try {
+      const { data: challenge, error: challengeErr } = await supabase.auth.mfa.challenge({
+        factorId: enrollData.id,
+      })
+      if (challengeErr) throw challengeErr
+
+      const { error: verifyErr } = await supabase.auth.mfa.verify({
+        factorId: enrollData.id,
+        challengeId: challenge.id,
+        code: verifyMfaCode.trim(),
+      })
+      if (verifyErr) throw verifyErr
+
+      await supabase.rpc('log_auth_event' as any, {
+        p_event_type: 'MFA_ENROLLED',
+        p_email: email,
+        p_user_agent: navigator.userAgent,
+      })
+
+      setMfaMsg({ type: 'success', text: 'Two-factor authentication successfully enabled on your account!' })
+      setEnrollingMfa(false)
+      setEnrollData(null)
+      setVerifyMfaCode('')
+      await loadMfaFactors()
+      if (userId) loadAuthLogs(userId)
+    } catch (err: unknown) {
+      const e = err as Error
+      setMfaMsg({ type: 'error', text: e.message || 'Invalid verification code. Please check your authenticator app.' })
+    } finally {
+      setMfaActionLoading(false)
+    }
+  }
+
+  const handleDisableMfa = async (factorId: string) => {
+    if (!confirm('Are you sure you want to disable Two-Factor Authentication? Your account will be less secure.')) {
+      return
+    }
+
+    setMfaMsg(null)
+    setMfaActionLoading(true)
+    try {
+      const { error } = await supabase.auth.mfa.unenroll({
+        factorId,
+      })
+      if (error) throw error
+
+      await supabase.rpc('log_auth_event' as any, {
+        p_event_type: 'MFA_UNENROLLED',
+        p_email: email,
+        p_user_agent: navigator.userAgent,
+      })
+
+      setMfaMsg({ type: 'success', text: 'Two-factor authentication has been disabled.' })
+      await loadMfaFactors()
+      if (userId) loadAuthLogs(userId)
+    } catch (err: unknown) {
+      const e = err as Error
+      setMfaMsg({ type: 'error', text: e.message || 'Failed to unenroll 2FA.' })
+    } finally {
+      setMfaActionLoading(false)
+    }
+  }
+
+  const handleCopySecret = () => {
+    if (!enrollData?.secret) return
+    navigator.clipboard.writeText(enrollData.secret)
+    setCopiedSecret(true)
+    setTimeout(() => setCopiedSecret(false), 2500)
   }
 
   if (loading) {
@@ -761,6 +913,17 @@ export const Settings: React.FC = () => {
           </div>
         )}
 
+        {/* 48-Hour Withdrawal Cooldown Notice */}
+        <div className="p-3.5 rounded-xl bg-blue-50/70 border border-blue-200 text-blue-900 text-xs flex items-start gap-2.5">
+          <span className="text-base text-blue-600">🛡️</span>
+          <div>
+            <strong className="block font-bold">48-Hour Withdrawal Security Hold</strong>
+            <span className="text-blue-800">
+              For your account safety and anti-takeover protection, commission withdrawals are paused for 48 hours whenever you update your payout bank account.
+            </span>
+          </div>
+        </div>
+
         {/* Affiliate Program Status Banner */}
         {referralCode ? (
           <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -911,6 +1074,298 @@ export const Settings: React.FC = () => {
 
         <div className="pt-2 text-[11px] text-gray-400">
           Payouts are credited directly to your verified Nigerian bank account. Cooldown applies to all future bank detail updates.
+        </div>
+      </div>
+
+      {/* Security & Two-Factor Authentication (2FA) Card */}
+      <div className="bg-white p-6 sm:p-8 rounded-2xl border border-gray-200 shadow-2xs space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-5">
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+                <span>🔒</span>
+                <span>Account Protection</span>
+              </span>
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                ★ Recommended for Admins
+              </span>
+            </div>
+            <h2 className="text-lg sm:text-xl font-bold text-gray-900">
+              Two-Factor Authentication (2FA)
+            </h2>
+            <p className="text-xs sm:text-sm text-gray-500 mt-0.5">
+              Protect your candidate and administrative access with TOTP-based multi-factor authentication (Google Authenticator, Authy, or 1Password).
+            </p>
+          </div>
+
+          <div>
+            {mfaFactors.length === 0 ? (
+              !enrollingMfa && (
+                <button
+                  type="button"
+                  onClick={handleStartMfaEnroll}
+                  disabled={mfaActionLoading}
+                  className="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {mfaActionLoading ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      <span>Initializing...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>+</span>
+                      <span>Enable 2FA</span>
+                    </>
+                  )}
+                </button>
+              )
+            ) : (
+              <button
+                type="button"
+                onClick={() => handleDisableMfa(mfaFactors[0].id)}
+                disabled={mfaActionLoading}
+                className="px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {mfaActionLoading ? 'Disabling...' : 'Disable 2FA'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Action / Feedback Notifications */}
+        {mfaMsg && (
+          <div
+            className={`p-4 rounded-xl border text-xs sm:text-sm font-medium flex items-center justify-between ${
+              mfaMsg.type === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-rose-50 border-rose-200 text-rose-800'
+            }`}
+          >
+            <span>{mfaMsg.text}</span>
+            <button
+              type="button"
+              onClick={() => setMfaMsg(null)}
+              className="text-gray-400 hover:text-gray-600 font-bold ml-2 cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* 2FA Status Banner */}
+        {mfaFactors.length > 0 ? (
+          <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200 flex items-start sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center text-xl shrink-0">
+                🛡️
+              </div>
+              <div>
+                <div className="text-xs sm:text-sm font-bold text-emerald-950 flex items-center gap-2">
+                  <span>2FA Active & Enforced</span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-200 text-emerald-800 font-bold uppercase">
+                    TOTP Authenticator
+                  </span>
+                </div>
+                <p className="text-xs text-emerald-800 mt-0.5">
+                  Your account is protected. A 6-digit TOTP code is required on every subsequent sign-in attempt.
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          !enrollingMfa && (
+            <div className="p-4 rounded-xl bg-gray-50 border border-gray-200 flex items-start gap-3 text-xs sm:text-sm text-gray-600">
+              <span className="text-xl shrink-0">ℹ️</span>
+              <div>
+                <span className="font-bold text-gray-800 block">Two-factor authentication is not yet enabled.</span>
+                <span>
+                  Adding 2FA prevents unauthorized account takeovers and protects your earnings, test data, and administrative privileges.
+                </span>
+              </div>
+            </div>
+          )
+        )}
+
+        {/* Enrolling Flow: QR Code + Secret + Code Verification */}
+        {enrollingMfa && enrollData && (
+          <div className="p-6 rounded-2xl bg-gray-50 border border-gray-200 space-y-6">
+            <div className="border-b border-gray-200 pb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-gray-900">
+                  Step-by-Step 2FA Setup
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Scan the QR code with your authenticator app, or enter the secret key manually.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEnrollingMfa(false)
+                  setEnrollData(null)
+                  setVerifyMfaCode('')
+                }}
+                className="text-xs font-semibold text-gray-500 hover:text-gray-800 cursor-pointer"
+              >
+                Cancel Setup
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+              {/* QR Code Container */}
+              <div className="flex flex-col items-center justify-center p-4 bg-white rounded-xl border border-gray-200 shadow-2xs">
+                {enrollData.qr_code ? (
+                  <img
+                    src={enrollData.qr_code}
+                    alt="Authenticator QR Code"
+                    className="w-48 h-48 rounded-lg"
+                  />
+                ) : (
+                  <div className="w-48 h-48 bg-gray-100 rounded-lg flex items-center justify-center text-xs text-gray-400">
+                    Generating QR code...
+                  </div>
+                )}
+                <span className="text-[11px] text-gray-400 mt-2 font-mono">
+                  Scan in Google Authenticator or Authy
+                </span>
+              </div>
+
+              {/* Manual Secret & Verification Form */}
+              <div className="space-y-4 text-xs sm:text-sm">
+                <div>
+                  <label className="block text-xs font-bold uppercase text-gray-600 tracking-wider mb-1">
+                    Manual Setup Key
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={enrollData.secret}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white font-mono text-xs font-bold text-gray-800"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleCopySecret}
+                      className="px-3 py-2 rounded-lg text-xs font-bold bg-gray-200 hover:bg-gray-300 text-gray-800 shrink-0 transition-colors cursor-pointer"
+                    >
+                      {copiedSecret ? '✓ Copied' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+
+                <form onSubmit={handleConfirmMfaEnroll} className="space-y-3 pt-2">
+                  <div>
+                    <label className="block text-xs font-bold uppercase text-gray-700 tracking-wider mb-1">
+                      Enter 6-Digit Code from App
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      maxLength={6}
+                      required
+                      value={verifyMfaCode}
+                      onChange={(e) => setVerifyMfaCode(e.target.value.replace(/\D/g, ''))}
+                      placeholder="123456"
+                      className="w-full tracking-[0.5em] font-mono text-lg font-black text-center py-2.5 px-3 rounded-xl border border-gray-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={mfaActionLoading || verifyMfaCode.length !== 6}
+                    className="w-full py-2.5 px-4 rounded-xl text-xs sm:text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs transition-colors cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {mfaActionLoading ? 'Verifying...' : 'Confirm & Enable 2FA'}
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Recent Authentication & Login Activity History */}
+        <div className="pt-4 border-t border-gray-100 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-xs sm:text-sm font-bold text-gray-900">
+                Recent Account Security & Login Activity
+              </h3>
+              <p className="text-[11px] text-gray-500">
+                Log of your recent sign-ins and security events.
+              </p>
+            </div>
+            {userId && (
+              <button
+                type="button"
+                onClick={() => loadAuthLogs(userId)}
+                className="text-xs font-semibold text-emerald-600 hover:text-emerald-700 cursor-pointer"
+              >
+                Refresh
+              </button>
+            )}
+          </div>
+
+          {loadingAuthLogs ? (
+            <div className="py-4 text-center text-xs text-gray-400">Loading activity history...</div>
+          ) : userAuthLogs.length === 0 ? (
+            <div className="py-4 text-center text-xs text-gray-400 bg-gray-50 rounded-xl">
+              No recent security activity logged yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th className="py-2.5 px-3">Date & Time</th>
+                    <th className="py-2.5 px-3">Event</th>
+                    <th className="py-2.5 px-3">Device / Browser</th>
+                    <th className="py-2.5 px-3">Security Flag</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {userAuthLogs.map((log) => (
+                    <tr key={log.id} className="hover:bg-gray-50/50">
+                      <td className="py-2.5 px-3 text-gray-600 whitespace-nowrap">
+                        {new Date(log.created_at).toLocaleString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            log.event_type === 'LOGIN_SUCCESS' || log.event_type === 'MFA_VERIFIED' || log.event_type === 'MFA_ENROLLED'
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : log.event_type === 'LOGIN_FAILED' || log.event_type === 'MFA_CHALLENGE_FAILED'
+                              ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                              : 'bg-blue-50 text-blue-700 border border-blue-200'
+                          }`}
+                        >
+                          {log.event_type}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-gray-700 font-medium whitespace-nowrap">
+                        {log.device_summary || 'Web Browser'}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        {log.is_suspicious ? (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                            ⚠️ Anomaly Detected
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-gray-400">Normal</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -138,7 +138,7 @@ export interface Notice {
   updated_at: string
 }
 
-type AdminTab = 'analytics' | 'questions' | 'support' | 'notices' | 'users' | 'access' | 'settings' | 'monetization'
+type AdminTab = 'analytics' | 'questions' | 'support' | 'notices' | 'users' | 'access' | 'settings' | 'monetization' | 'security'
 
 export const Admin: React.FC = () => {
   // Navigation & Authentication
@@ -158,6 +158,17 @@ export const Admin: React.FC = () => {
     can_manage_maintenance?: boolean
   } | null>(null)
   const [loadingUser, setLoadingUser] = useState<boolean>(true)
+
+  // Security & Audit Tab State
+  const [systemAuditLogs, setSystemAuditLogs] = useState<any[]>([])
+  const [authAuditLogs, setAuthAuditLogs] = useState<any[]>([])
+  const [loadingSecurityAudit, setLoadingSecurityAudit] = useState<boolean>(false)
+  const [systemAuditFilter, setSystemAuditFilter] = useState<string>('ALL')
+  const [systemAuditSearch, setSystemAuditSearch] = useState<string>('')
+  const [expandedDiffId, setExpandedDiffId] = useState<string | null>(null)
+  const [authAuditFilter, setAuthAuditFilter] = useState<string>('ALL')
+  const [authAuditSearch, setAuthAuditSearch] = useState<string>('')
+  const [suspiciousLoginCount, setSuspiciousLoginCount] = useState<number>(0)
 
   // Monetization Tab State
   const [adminPayouts, setAdminPayouts] = useState<any[]>([])
@@ -1101,6 +1112,45 @@ export const Admin: React.FC = () => {
       console.warn('Error fetching admin monetization data:', err)
     } finally {
       setLoadingAdminMonetization(false)
+    }
+  }
+
+  // Fetch System-Wide Security Audit Logs & Login Telemetry
+  const fetchSecurityAuditData = async () => {
+    setLoadingSecurityAudit(true)
+    try {
+      // 1. Fetch immutable system audit logs
+      const { data: sysLogs, error: sysErr } = await supabase
+        .from('system_audit_logs' as any)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100)
+
+      if (!sysErr && sysLogs) {
+        setSystemAuditLogs(sysLogs)
+      }
+
+      // 2. Fetch authentication & login audit logs
+      const { data: authLogs, error: authErr } = await supabase
+        .from('auth_audit_logs' as any)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100)
+
+      if (!authErr && authLogs) {
+        setAuthAuditLogs(authLogs)
+
+        // Tally anomalous login bursts in past 24 hours
+        const past24h = Date.now() - 24 * 60 * 60 * 1000
+        const suspicious = authLogs.filter(
+          (l: any) => l.is_suspicious && new Date(l.created_at).getTime() >= past24h
+        )
+        setSuspiciousLoginCount(suspicious.length)
+      }
+    } catch (err) {
+      console.warn('Error fetching security audit logs:', err)
+    } finally {
+      setLoadingSecurityAudit(false)
     }
   }
 
@@ -2497,6 +2547,29 @@ export const Admin: React.FC = () => {
             {adminPendingPayoutsCount > 0 && (
               <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-amber-500 text-white font-bold font-mono animate-pulse">
                 {adminPendingPayoutsCount}
+              </span>
+            )}
+          </button>
+        )}
+
+        {/* Tab 7: Security & Audit Logs (Super Admin) */}
+        {isSuperAdmin && (
+          <button
+            onClick={() => {
+              setActiveTab('security')
+              fetchSecurityAuditData()
+            }}
+            className={`py-3 px-5 text-xs sm:text-sm font-semibold border-b-2 whitespace-nowrap transition-all cursor-pointer flex items-center gap-2 ${
+              activeTab === 'security'
+                ? 'border-emerald-600 text-emerald-700 bg-white rounded-t-lg'
+                : 'border-transparent text-gray-500 hover:text-gray-900'
+            }`}
+          >
+            <span>🛡️</span>
+            <span>Security & Audit</span>
+            {suspiciousLoginCount > 0 && (
+              <span className="text-[11px] px-1.5 py-0.2 rounded-full bg-rose-500 text-white font-bold font-mono animate-pulse">
+                {suspiciousLoginCount}
               </span>
             )}
           </button>
@@ -5236,6 +5309,390 @@ export const Admin: React.FC = () => {
                               </tr>
                             )
                           })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ======================================================================= */}
+      {/* SECTION 7: SYSTEM SECURITY & AUDIT CENTER (Super Admin Only)            */}
+      {/* ======================================================================= */}
+      {activeTab === 'security' && (
+        <div className="space-y-6">
+          {!isSuperAdmin ? (
+            <div className="p-8 rounded-2xl bg-white border border-gray-200 text-center space-y-3">
+              <div className="text-3xl">🔒</div>
+              <h3 className="text-base font-bold text-gray-900">Restricted Access</h3>
+              <p className="text-xs text-gray-500 max-w-md mx-auto">
+                Only Super Administrators have permission to view immutable system audit ledgers and authentication security logs.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Top Action Bar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-xl border border-gray-200 shadow-2xs">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">🛡️</span>
+                    <h2 className="text-sm sm:text-base font-bold text-gray-900">
+                      Security & Immutable Audit Center
+                    </h2>
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 font-bold uppercase tracking-wider">
+                      Super Admin
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Immutable database audit logs for role modifications, permission shifts, questions, bank details, and authentication telemetry.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={fetchSecurityAuditData}
+                  disabled={loadingSecurityAudit}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <span className={loadingSecurityAudit ? 'animate-spin' : ''}>🔄</span>
+                  <span>Refresh Logs</span>
+                </button>
+              </div>
+
+              {/* Suspicious Activity Anomaly Alert Banner */}
+              {suspiciousLoginCount > 0 && (
+                <div className="p-4 rounded-xl bg-rose-50 border border-rose-300 text-rose-950 flex items-start gap-3 shadow-xs animate-in fade-in duration-200">
+                  <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center text-xl shrink-0">
+                    🚨
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-sm font-bold flex items-center gap-2">
+                      <span>Security Intrusion Alert</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-200 text-rose-900 font-bold uppercase">
+                        {suspiciousLoginCount} Suspicious Burst{suspiciousLoginCount > 1 ? 's' : ''} in last 24h
+                      </span>
+                    </div>
+                    <p className="text-xs text-rose-800 mt-1 leading-relaxed">
+                      Repeated failed login bursts (5+ attempts in 15 minutes) were flagged by the anomaly detection engine. Inspect the Authentication Audit Log below for source user agents and attempted candidate emails.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* ------------------------------------------------------------- */}
+              {/* CARD 1: IMMUTABLE SYSTEM-WIDE AUDIT TRAIL                     */}
+              {/* ------------------------------------------------------------- */}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden">
+                <div className="p-5 border-b border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                      <span>📑</span>
+                      <span>System Change Audit Trail (`system_audit_logs`)</span>
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Immutable record of administrative role changes, permission elevations, question updates, and bank account revisions.
+                    </p>
+                  </div>
+
+                  {/* Filters & Search */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={systemAuditFilter}
+                      onChange={(e) => setSystemAuditFilter(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg border border-gray-300 text-xs font-semibold text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="ALL">All Actions</option>
+                      <option value="ADMIN_ROLE_CHANGED">Role Changes</option>
+                      <option value="ADMIN_PERMISSIONS_CHANGED">Permission Changes</option>
+                      <option value="PRO_TIER_CHANGED">Pro Tier Changes</option>
+                      <option value="BANK_DETAILS_UPDATED">Bank Details</option>
+                      <option value="SYSTEM_SETTING_UPDATED">System Settings</option>
+                      <option value="QUESTION">Questions</option>
+                    </select>
+
+                    <input
+                      type="text"
+                      placeholder="Search actor or target..."
+                      value={systemAuditSearch}
+                      onChange={(e) => setSystemAuditSearch(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg border border-gray-300 text-xs placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                {loadingSecurityAudit ? (
+                  <div className="p-8 text-center text-xs text-gray-400">Loading system audit records...</div>
+                ) : systemAuditLogs.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-gray-400">No system audit records found.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[10px]">
+                        <tr>
+                          <th className="py-3 px-4">Timestamp</th>
+                          <th className="py-3 px-4">Actor</th>
+                          <th className="py-3 px-4">Action</th>
+                          <th className="py-3 px-4">Target Item</th>
+                          <th className="py-3 px-4 text-right">Details & Diff</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 font-sans">
+                        {systemAuditLogs
+                          .filter((log) => {
+                            if (systemAuditFilter !== 'ALL') {
+                              if (systemAuditFilter === 'QUESTION') {
+                                if (!log.action.startsWith('QUESTION_')) return false
+                              } else if (log.action !== systemAuditFilter) {
+                                return false
+                              }
+                            }
+                            if (systemAuditSearch.trim()) {
+                              const q = systemAuditSearch.toLowerCase()
+                              const matchEmail = (log.actor_email || '').toLowerCase().includes(q)
+                              const matchTarget = (log.target_label || '').toLowerCase().includes(q)
+                              const matchAction = (log.action || '').toLowerCase().includes(q)
+                              return matchEmail || matchTarget || matchAction
+                            }
+                            return true
+                          })
+                          .map((log) => {
+                            const isExpanded = expandedDiffId === log.id
+                            return (
+                              <React.Fragment key={log.id}>
+                                <tr className="hover:bg-gray-50/60 transition-colors">
+                                  <td className="py-3 px-4 text-gray-600 whitespace-nowrap font-mono text-[11px]">
+                                    {new Date(log.created_at).toLocaleString('en-US', {
+                                      month: 'short',
+                                      day: 'numeric',
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                      second: '2-digit',
+                                    })}
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <div className="font-semibold text-gray-900">
+                                      {log.actor_email || (log.actor_id ? log.actor_id.slice(0, 8) + '...' : 'System Trigger')}
+                                    </div>
+                                    <span
+                                      className={`text-[10px] px-1.5 py-0.2 rounded font-bold uppercase ${
+                                        log.actor_role === 'super_admin'
+                                          ? 'bg-purple-100 text-purple-700'
+                                          : log.actor_role === 'admin'
+                                          ? 'bg-blue-100 text-blue-700'
+                                          : 'bg-gray-100 text-gray-600'
+                                      }`}
+                                    >
+                                      {log.actor_role || 'system'}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <span
+                                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                        log.action === 'ADMIN_ROLE_CHANGED'
+                                          ? 'bg-purple-50 text-purple-800 border border-purple-200'
+                                          : log.action === 'ADMIN_PERMISSIONS_CHANGED'
+                                          ? 'bg-blue-50 text-blue-800 border border-blue-200'
+                                          : log.action === 'PRO_TIER_CHANGED'
+                                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                          : log.action === 'BANK_DETAILS_UPDATED'
+                                          ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                          : log.action === 'SYSTEM_SETTING_UPDATED'
+                                          ? 'bg-slate-100 text-slate-800 border border-slate-200'
+                                          : 'bg-teal-50 text-teal-800 border border-teal-200'
+                                      }`}
+                                    >
+                                      {log.action}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-4">
+                                    <div className="font-medium text-gray-800">
+                                      {log.target_label || 'N/A'}
+                                    </div>
+                                    <span className="text-[10px] text-gray-400 font-mono">
+                                      table: {log.target_table}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-4 text-right">
+                                    <button
+                                      type="button"
+                                      onClick={() => setExpandedDiffId(isExpanded ? null : log.id)}
+                                      className="px-2.5 py-1 rounded-lg text-xs font-semibold text-emerald-600 hover:text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition-colors cursor-pointer"
+                                    >
+                                      {isExpanded ? 'Hide Diff' : 'View Diff'}
+                                    </button>
+                                  </td>
+                                </tr>
+
+                                {/* Expandable Diff Viewer */}
+                                {isExpanded && (
+                                  <tr className="bg-slate-50/80">
+                                    <td colSpan={5} className="p-4 space-y-3">
+                                      <div className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                                        Data State Transformation (Before ➔ After)
+                                      </div>
+                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        {/* Old Data */}
+                                        <div className="space-y-1">
+                                          <span className="text-[11px] font-bold text-rose-700 uppercase tracking-wider">
+                                            Previous State (Before)
+                                          </span>
+                                          <pre className="p-3 rounded-xl bg-white border border-rose-200 text-rose-950 font-mono text-[11px] max-h-48 overflow-y-auto whitespace-pre-wrap">
+                                            {log.old_data
+                                              ? JSON.stringify(log.old_data, null, 2)
+                                              : 'null (Initial Creation)'}
+                                          </pre>
+                                        </div>
+
+                                        {/* New Data */}
+                                        <div className="space-y-1">
+                                          <span className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">
+                                            Updated State (After)
+                                          </span>
+                                          <pre className="p-3 rounded-xl bg-white border border-emerald-200 text-emerald-950 font-mono text-[11px] max-h-48 overflow-y-auto whitespace-pre-wrap">
+                                            {log.new_data
+                                              ? JSON.stringify(log.new_data, null, 2)
+                                              : 'null (Deletion)'}
+                                          </pre>
+                                        </div>
+                                      </div>
+
+                                      {log.metadata && Object.keys(log.metadata).length > 0 && (
+                                        <div className="pt-2 text-[11px] text-gray-500 font-mono">
+                                          Metadata: {JSON.stringify(log.metadata)}
+                                        </div>
+                                      )}
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
+                            )
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* ------------------------------------------------------------- */}
+              {/* CARD 2: AUTHENTICATION & LOGIN ACTIVITY LOGS                  */}
+              {/* ------------------------------------------------------------- */}
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-2xs overflow-hidden">
+                <div className="p-5 border-b border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                      <span>🔑</span>
+                      <span>Authentication & Login Log (`auth_audit_logs`)</span>
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      System-wide sign-in attempts, password reset requests, MFA enrollments, and intrusion anomalies.
+                    </p>
+                  </div>
+
+                  {/* Filters & Search */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={authAuditFilter}
+                      onChange={(e) => setAuthAuditFilter(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg border border-gray-300 text-xs font-semibold text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="ALL">All Auth Events</option>
+                      <option value="LOGIN_SUCCESS">Login Success</option>
+                      <option value="LOGIN_FAILED">Login Failed</option>
+                      <option value="MFA">MFA Events</option>
+                      <option value="SUSPICIOUS">Suspicious Only</option>
+                    </select>
+
+                    <input
+                      type="text"
+                      placeholder="Search email or device..."
+                      value={authAuditSearch}
+                      onChange={(e) => setAuthAuditSearch(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg border border-gray-300 text-xs placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                {loadingSecurityAudit ? (
+                  <div className="p-8 text-center text-xs text-gray-400">Loading auth audit records...</div>
+                ) : authAuditLogs.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-gray-400">No authentication logs found.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[10px]">
+                        <tr>
+                          <th className="py-3 px-4">Timestamp</th>
+                          <th className="py-3 px-4">Attempted Email</th>
+                          <th className="py-3 px-4">Event Type</th>
+                          <th className="py-3 px-4">Device Summary</th>
+                          <th className="py-3 px-4">Intrusion Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 font-sans">
+                        {authAuditLogs
+                          .filter((log) => {
+                            if (authAuditFilter !== 'ALL') {
+                              if (authAuditFilter === 'SUSPICIOUS') {
+                                if (!log.is_suspicious) return false
+                              } else if (authAuditFilter === 'MFA') {
+                                if (!log.event_type.startsWith('MFA_')) return false
+                              } else if (log.event_type !== authAuditFilter) {
+                                return false
+                              }
+                            }
+                            if (authAuditSearch.trim()) {
+                              const q = authAuditSearch.toLowerCase()
+                              const matchEmail = (log.email_attempted || '').toLowerCase().includes(q)
+                              const matchDevice = (log.device_summary || '').toLowerCase().includes(q)
+                              return matchEmail || matchDevice
+                            }
+                            return true
+                          })
+                          .map((log) => (
+                            <tr key={log.id} className="hover:bg-gray-50/60 transition-colors">
+                              <td className="py-3 px-4 text-gray-600 whitespace-nowrap font-mono text-[11px]">
+                                {new Date(log.created_at).toLocaleString('en-US', {
+                                  month: 'short',
+                                  day: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                })}
+                              </td>
+                              <td className="py-3 px-4 font-semibold text-gray-900 font-mono">
+                                {log.email_attempted || 'Anonymous / Unspecified'}
+                              </td>
+                              <td className="py-3 px-4">
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                    log.event_type === 'LOGIN_SUCCESS' || log.event_type === 'MFA_VERIFIED' || log.event_type === 'MFA_ENROLLED'
+                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                      : log.event_type === 'LOGIN_FAILED' || log.event_type === 'MFA_CHALLENGE_FAILED'
+                                      ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                                      : 'bg-blue-50 text-blue-700 border border-blue-200'
+                                  }`}
+                                >
+                                  {log.event_type}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-gray-700 font-medium">
+                                {log.device_summary || 'Web Browser'}
+                              </td>
+                              <td className="py-3 px-4">
+                                {log.is_suspicious ? (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300 animate-pulse flex items-center gap-1 w-fit">
+                                    <span>⚠️</span>
+                                    <span>Suspicious Burst</span>
+                                  </span>
+                                ) : (
+                                  <span className="text-[11px] text-gray-400">Normal</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
                       </tbody>
                     </table>
                   </div>

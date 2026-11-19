@@ -37,6 +37,7 @@ export interface Database {
           account_number: string | null
           account_name: string | null
           bank_details_updated_at: string | null
+          bank_updated_at: string | null
           last_read_notices: string | null
           created_at: string
           updated_at: string
@@ -68,6 +69,7 @@ export interface Database {
           account_number?: string | null
           account_name?: string | null
           bank_details_updated_at?: string | null
+          bank_updated_at?: string | null
           last_read_notices?: string | null
           created_at?: string
           updated_at?: string
@@ -99,6 +101,7 @@ export interface Database {
           account_number?: string | null
           account_name?: string | null
           bank_details_updated_at?: string | null
+          bank_updated_at?: string | null
           last_read_notices?: string | null
           created_at?: string
           updated_at?: string
@@ -587,6 +590,99 @@ export interface Database {
           created_at?: string
         }
       }
+      system_audit_logs: {
+        Row: {
+          id: string
+          actor_id: string | null
+          actor_email: string | null
+          actor_role: string | null
+          action: string
+          target_table: string
+          target_id: string | null
+          target_label: string | null
+          old_data: Json | null
+          new_data: Json | null
+          metadata: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          actor_id?: string | null
+          actor_email?: string | null
+          actor_role?: string | null
+          action: string
+          target_table: string
+          target_id?: string | null
+          target_label?: string | null
+          old_data?: Json | null
+          new_data?: Json | null
+          metadata?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          actor_id?: string | null
+          actor_email?: string | null
+          actor_role?: string | null
+          action?: string
+          target_table?: string
+          target_id?: string | null
+          target_label?: string | null
+          old_data?: Json | null
+          new_data?: Json | null
+          metadata?: Json
+          created_at?: string
+        }
+      }
+      auth_audit_logs: {
+        Row: {
+          id: string
+          user_id: string | null
+          email_attempted: string | null
+          event_type: string
+          user_agent: string | null
+          device_summary: string | null
+          is_suspicious: boolean
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          user_id?: string | null
+          email_attempted?: string | null
+          event_type: string
+          user_agent?: string | null
+          device_summary?: string | null
+          is_suspicious?: boolean
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string | null
+          email_attempted?: string | null
+          event_type?: string
+          user_agent?: string | null
+          device_summary?: string | null
+          is_suspicious?: boolean
+          created_at?: string
+        }
+      }
+      api_rate_limits: {
+        Row: {
+          bucket_key: string
+          window_start: string
+          request_count: number
+        }
+        Insert: {
+          bucket_key: string
+          window_start: string
+          request_count?: number
+        }
+        Update: {
+          bucket_key?: string
+          window_start?: string
+          request_count?: number
+        }
+      }
     }
     Functions: {
       validate_referral_code: {
@@ -652,6 +748,25 @@ export interface Database {
           refunded_amount?: number
           message?: string
         }
+      }
+      log_auth_event: {
+        Args: {
+          p_event_type: string
+          p_email?: string | null
+          p_user_agent?: string | null
+        }
+        Returns: {
+          success: boolean
+          is_suspicious: boolean
+        }
+      }
+      check_rate_limit: {
+        Args: {
+          p_bucket_key: string
+          p_max_requests: number
+          p_window_seconds: number
+        }
+        Returns: boolean
       }
     }
   }
